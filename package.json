@@ -1,0 +1,38 @@
+{
+  "name": "revmap",
+  "version": "0.1.0",
+  "description": "A local, agent-guided review map. Review changes in one self-contained HTML page.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Andiedie/revmap.git"
+  },
+  "bin": {
+    "revmap": "dist/cli.cjs"
+  },
+  "files": [
+    "dist/cli.cjs",
+    "dist/THIRD_PARTY_NOTICES.txt",
+    "skills",
+    "examples",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.cjs",
+    "test:browser": "npm run build && node test/browser.cjs",
+    "prepack": "npm run check && npm run build"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^22.0.0",
+    "diff": "^8.0.4",
+    "esbuild": "^0.25.0",
+    "markdown-it": "^14.1.0",
+    "playwright": "^1.61.1",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "files": [
+    {
+      "path": "src/git.ts",
+      "priority": "high",
+      "comments": [
+        { "text": "Start with snapshot boundaries: only listed paths enter the review, and patch contents must match comment coordinates." }
+      ]
+    },
+    {
+      "path": "src/web.ts",
+      "comments": [
+        { "text": "Walk through line selection, replies, Viewed, and copying the final feedback. Everything stays inside this page." }
+      ]
+    },
+    { "path": "src/model.ts", "priority": "low" }
+  ]
+}

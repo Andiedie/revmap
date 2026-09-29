@@ -94,4 +94,23 @@ npm exec --yes --package ./revmap-0.1.0.tgz -- revmap --help
 
 Runtime input and snapshot types live in `src/model.ts`; validation and Git access are separate from browser interaction and Markdown export. `src/core.ts` is a local test entry point, not a public package API.
 
+## Publishing
+
+Releases use GitHub Actions and npm's OIDC trusted publishing:
+
+- `.github/workflows/publish.yml`: a push of a `v*` tag runs typecheck, Node tests and Chromium browser tests before `npm publish`. The pushed tag must exactly equal `v${package.json.version}`. `workflow_dispatch` runs checks only and must never publish, even when targeting a tag.
+- Publish on GitHub-hosted `ubuntu-latest`, with Node 24/npm 11.19.1, `contents: read` and `id-token: write`; no stored npm publishing token. [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) requires Node ≥22.14.0 and npm ≥11.5.1; verify the installed npm version. Self-hosted runners are unsupported.
+- Bind npm trust exactly (case-sensitive) to `Andiedie/revmap`, workflow filename `publish.yml` (not its path), and environment `npm`. Explicitly allow direct `npm publish`, not just staged publishing. CLI management via [`npm trust`](https://docs.npmjs.com/cli/v11/commands/npm-trust/) requires npm ≥11.15.0, an existing package, package write access and account 2FA; use `--allow-publish` when creating this trust.
+- The publish job must reference environment `npm`. In GitHub's [environment rules](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#creating-an-environment), choose **Selected branches and tags**, with only a **Tag** rule for `v*`—not a Branch rule or “Protected branches only.” Keep checks outside this tag-restricted job so manual runs on `main` can complete.
+- [Provenance is automatic](https://docs.npmjs.com/trusted-publishers/#automatic-provenance-generation) for OIDC publishing from a public repository to a public package; `--provenance` is unnecessary. Keep `package.json.repository.url` matched to this repository, including case.
+
+For the next stable patch release, update and commit `CHANGELOG.md` on `main`, ensure a clean worktree, then:
+
+```sh
+npm version patch
+git push --atomic origin main --follow-tags
+```
+
+Manual runs validate CI checks only. Saved npm trust settings are not validated by npm; verify OIDC publishing and provenance on the next real release.
+
 Licensed under the [MIT License](LICENSE). Bundled third-party code retains its licenses in `dist/THIRD_PARTY_NOTICES.txt`.

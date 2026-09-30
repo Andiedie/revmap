@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Keep each file header visible while scrolling its diff, with Viewed and other file actions accessible until the next file takes over.
+- Show compact filenames in navigation; add the shortest distinguishing parent path only for same-named files, and truncate long paths without growing navigation items. Full paths remain available in file headers and search.
+
 ## 0.1.1
 
 - Automatically save Viewed, comments, replies and changed drafts in browser-local storage per review snapshot; restore them when refreshing or reopening the same HTML in the same browser.

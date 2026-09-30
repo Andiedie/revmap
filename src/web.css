@@ -386,10 +386,20 @@ progress::-moz-progress-bar {
   color: var(--green);
 }
 .nav-path {
-  overflow-wrap: anywhere;
   min-width: 0;
   flex: 1;
   line-height: 1.4;
+}
+.nav-name,
+.nav-directory {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-directory {
+  font-size: 11px;
+  color: var(--muted);
 }
 .nav-count {
   font: 10px ui-monospace, monospace;
@@ -452,13 +462,17 @@ progress::-moz-progress-bar {
 .file-card {
   border: 1px solid var(--border);
   border-radius: 7px;
-  overflow: hidden;
+  overflow: clip;
   margin-bottom: 20px;
   scroll-margin-top: 16px;
   box-shadow: var(--shadow);
   container-type: inline-size;
 }
 .file-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 1px 0 var(--border);
   display: flex;
   gap: 10px;
   align-items: center;

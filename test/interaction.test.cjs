@@ -59,6 +59,68 @@ test('file disclosure is centered, borderless on hover, and usable through the f
   await page.locator('#file-0 .file-header').screenshot({ path: path.join(artifacts, 'disclosure-keyboard.png') });
 });
 
+for (const mobile of [false, true]) test(`file headers stick within their own file and keep Viewed usable on ${mobile ? 'mobile' : 'desktop'}`, options, async t => {
+  const page = await pageFor(t, mobile);
+  await page.locator('#file-0 [data-action="expand-context"][data-start="25"][data-amount="all"]').click();
+  const header = page.locator('#file-0 .file-header');
+  const scrollInside = () => page.locator('#file-0').evaluate(el => scrollTo(0, scrollY + el.getBoundingClientRect().top + 500));
+  await scrollInside();
+  const pinned = await header.boundingBox();
+  assert.ok(Math.abs(pinned.y) < 1, 'the current filename and controls must stay at the viewport top');
+  await page.locator('#file-0 .diff-scroll').evaluate(el => el.scrollLeft = 300);
+  assert.deepEqual(await header.boundingBox(), pinned, 'horizontal code scrolling must not move the file header');
+  assert.equal(await page.locator('[data-viewed="0"]').evaluate(el => {
+    const box = el.getBoundingClientRect();
+    return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === el;
+  }), true, 'diff content must not cover the sticky Viewed control');
+  await page.locator('#file-0 .diff-scroll').evaluate(el => el.scrollLeft = 0);
+  await page.screenshot({ path: path.join(artifacts, `sticky-header-${mobile ? 'mobile' : 'desktop'}.png`) });
+  // Leave enough scroll room after the long file, even though the remaining fixtures are short.
+  await page.setViewportSize({ width: mobile ? 390 : 1440, height: 300 });
+  await page.locator('#file-0').evaluate(el => {
+    const card = el.getBoundingClientRect(), header = el.querySelector('.file-header').getBoundingClientRect();
+    scrollTo(0, scrollY + card.bottom - header.height / 2);
+  });
+  const released = await header.boundingBox(), card = await page.locator('#file-0').boundingBox();
+  assert.ok(released.y < 0 && Math.abs(released.y + released.height - card.y - card.height + 1) < 1, 'the header must leave with the end of its file');
+  await page.locator('#file-1').evaluate(el => scrollTo(0, scrollY + el.getBoundingClientRect().top + 30));
+  assert.ok(Math.abs((await page.locator('#file-1 .file-header').boundingBox()).y) < 1, 'the next file takes over the sticky position');
+  const previous = await header.boundingBox();
+  assert.ok(previous.y + previous.height <= 0, 'previous headers must not stack above the next file');
+  await scrollInside();
+  await page.locator('[data-viewed="0"]').check();
+  assert.equal(await page.locator('[data-viewed="0"]').isChecked(), true);
+  assert.equal(await page.locator('#file-0 .file-body').isVisible(), false);
+});
+
+test('navigation keeps filenames compact, adds parent paths only for duplicates, and still searches and opens full paths', options, async t => {
+  const page = await pageFor(t);
+  const review = await page.evaluate(() => JSON.parse(document.getElementById('review-data').textContent));
+  const shared = 'common-directory/'.repeat(8);
+  const paths = ['src/deep/' + 'long-directory/'.repeat(8) + '<file&".ts', `src/client/${shared}index.ts`, `src/server/${shared}index.ts`, 'index.ts'];
+  review.files.forEach((file, i) => file.path = paths[i]);
+  const output = path.join(artifacts, 'navigation.html');
+  fs.writeFileSync(output, renderHTML(review));
+  await page.goto(pathToFileURL(output).href);
+  await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  assert.deepEqual(await page.locator('#file-nav .nav-name').allTextContents(), ['<file&".ts', 'index.ts', 'index.ts', 'index.ts']);
+  assert.deepEqual(await page.locator('#file-nav .nav-directory').allTextContents(), [`client/${shared.slice(0, -1)}`, `server/${shared.slice(0, -1)}`, '.'], 'use the shortest parent suffix that distinguishes same-named files');
+  for (let i = 0; i < paths.length; i++) assert.equal(await page.locator(`#file-nav [data-file="${i}"]`).getAttribute('title'), paths[i]);
+  assert.equal(await page.locator('#file-nav img').count(), 0, 'literal filenames must stay escaped');
+  for (const width of [1440, 1024, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    if (width === 390) await page.locator('[data-action="nav"]').click();
+    for (const link of await page.locator('#file-nav .nav-file').all()) assert.ok((await link.boundingBox()).height <= 52, 'a deep parent path must not make a tall navigation item');
+  }
+  await page.locator('#sidebar').screenshot({ path: path.join(artifacts, 'compact-navigation.png') });
+  await page.locator('#search').fill('src/server');
+  assert.equal(await page.locator('#file-nav .nav-file').count(), 1, 'filtering still matches parent directories omitted from the label');
+  assert.equal(await page.locator('#file-nav .nav-directory').count(), 1, 'filtering must not change how duplicate names are labelled');
+  await page.locator('#file-nav [data-file="2"]').click();
+  assert.equal(await page.locator('#file-2 .file-title strong').textContent(), paths[2], 'the file header keeps the full path');
+  assert.equal(await page.locator('#file-2 .file-toggle').getAttribute('aria-expanded'), 'true');
+});
+
 test('responsive rerender preserves the focused draft and its selection', options, async t => {
   const page = await pageFor(t);
   await page.locator('#file-0 [data-action="file-comment"]').click();

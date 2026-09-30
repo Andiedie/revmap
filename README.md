@@ -89,7 +89,7 @@ npx skills add . --list
 The published package includes the compiled CLI and embedded browser assets, Skill and example; dependencies are bundled. A local package can be exercised without publishing:
 
 ```sh
-npm exec --yes --package ./revmap-0.1.1.tgz -- revmap --help
+npm exec --yes --package ./revmap-0.1.2.tgz -- revmap --help
 ```
 
 Runtime input and snapshot types live in `src/model.ts`; validation and Git access are separate from browser interaction and Markdown export. `src/core.ts` is a local test entry point, not a public package API.

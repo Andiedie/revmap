@@ -3,6 +3,21 @@ import { lines, Note, Review, Side } from './model';
 import { CodeRow, diffRows, exportMarkdown, Feedback, initialFeedback, location, Range, revealRows, Row, Thread } from './view';
 
 const review: Review = JSON.parse(document.getElementById('review-data')!.textContent!);
+const suffixCounts = new Map<string, number>();
+for (const file of review.files) {
+  let suffix = '';
+  for (const part of file.path.split('/').reverse()) {
+    suffix = suffix ? `${part}/${suffix}` : part;
+    suffixCounts.set(suffix, (suffixCounts.get(suffix) || 0) + 1);
+  }
+}
+const fileLabels = review.files.map(file => {
+  const parts = file.path.split('/'), name = parts.pop()!;
+  if (suffixCounts.get(name) === 1) return { name, directory: '' };
+  let depth = 1;
+  while (depth < parts.length && suffixCounts.get(`${parts.slice(-depth).join('/')}/${name}`)! > 1) depth++;
+  return { name, directory: parts.slice(-depth).join('/') || '.' };
+});
 const md = new MarkdownIt({ html: false, linkify: false, breaks: true }).disable('image');
 const escape = (text: unknown) => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 const markdown = (text: string) => md.render(text).replace(/<a /g, '<a target="_blank" rel="noreferrer noopener" ');
@@ -144,7 +159,7 @@ function updateNavigation(): void {
   const viewed = states.filter(s => s.viewed).length;
   document.getElementById('progress-text')!.textContent = `${viewed} / ${states.length} viewed`;
   (document.getElementById('progress') as HTMLProgressElement).value = viewed;
-  document.getElementById('file-nav')!.innerHTML = review.files.map((file, i) => !visible(i) ? '' : `<a href="#file-${i}" data-action="navigate" data-file="${i}" class="nav-file ${states[i].viewed ? 'is-viewed' : ''}"><span class="nav-order">${states[i].viewed ? '✓' : i + 1}</span><span class="nav-path">${escape(file.path)}</span>${draftBadge(i)}<span class="priority-dot ${file.priority}" title="${file.priority} priority"><span class="sr-only">${file.priority} priority</span></span>${humanCount(i) ? `<span class="nav-count" aria-label="${humanCount(i)} feedback comments">${humanCount(i)}</span>` : ''}</a>`).join('');
+  document.getElementById('file-nav')!.innerHTML = review.files.map((file, i) => !visible(i) ? '' : `<a href="#file-${i}" data-action="navigate" data-file="${i}" title="${escape(file.path)}" class="nav-file ${states[i].viewed ? 'is-viewed' : ''}"><span class="nav-order">${states[i].viewed ? '✓' : i + 1}</span><span class="nav-path"><span class="nav-name">${escape(fileLabels[i].name)}</span>${fileLabels[i].directory ? `<span class="nav-directory">${escape(fileLabels[i].directory)}</span>` : ''}</span>${draftBadge(i)}<span class="priority-dot ${file.priority}" title="${file.priority} priority"><span class="sr-only">${file.priority} priority</span></span>${humanCount(i) ? `<span class="nav-count" aria-label="${humanCount(i)} feedback comments">${humanCount(i)}</span>` : ''}</a>`).join('');
   let count = 0;
   states.forEach((_, i) => { const shown = visible(i); document.getElementById(`file-${i}`)!.hidden = !shown; if (shown) count++; });
   document.getElementById('visible-count')!.textContent = `${count} file${count === 1 ? '' : 's'}`;

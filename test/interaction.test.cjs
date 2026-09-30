@@ -275,6 +275,29 @@ test('horizontal inspection survives rerenders and comment editors remain within
   await page.locator('#file-0').screenshot({ path: path.join(artifacts, 'horizontal-comment.png') });
 });
 
+test('inline reply editor and actions fit inside the visible diff at every scroll position', options, async t => {
+  const page = await pageFor(t);
+  await page.locator('#file-0 [data-action="line"][data-side="new"][data-line="20"]').first().click();
+  await page.locator('#comment-text').fill('Check this line.');
+  await page.locator('#composer button[type="submit"]').click();
+  await page.locator('#thread-u-1 [data-action="reply"]').click();
+  const bounds = async () => page.evaluate(() => {
+    const viewport = document.querySelector('#file-0 .diff-scroll').getBoundingClientRect();
+    const thread = document.querySelector('#thread-u-1').getBoundingClientRect();
+    return ['#comment-text', '#composer button[type="submit"]'].map(selector => {
+      const box = document.querySelector(selector).getBoundingClientRect();
+      return { selector, right: box.right, edge: Math.min(viewport.right, thread.right) };
+    });
+  });
+  for (const width of [1440, 1024, 768, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    for (const scrollLeft of [0, 500]) {
+      await page.locator('#file-0 .diff-scroll').evaluate((el, left) => { el.scrollLeft = left; }, scrollLeft);
+      for (const box of await bounds()) assert.ok(box.right <= box.edge - 1, `${box.selector} clipped at width=${width} scrollLeft=${scrollLeft}: ${JSON.stringify(box)}`);
+    }
+  }
+});
+
 test('marking the current file viewed under Unviewed moves focus to the next visible file', options, async t => {
   const page = await pageFor(t);
   await page.locator('[data-filter="unviewed"]').click();
@@ -311,70 +334,78 @@ async function copyFeedback(page) {
   await page.locator('[data-action="close-export"]').click();
 }
 
-test('leaving tracks feedback and draft changes, not presentation; copying clears the warning until the next change', options, async t => {
+async function reloadReview(page) {
+  await page.reload();
+  await page.locator('#boot-error').waitFor({ state: 'hidden' });
+}
+const storageKey = page => page.locator('meta[name="revmap-storage-key"]').getAttribute('content');
+
+test('feedback, edits, replies, deletions and Viewed survive refresh without requiring a copy', options, async t => {
   const page = await pageFor(t);
-  assert.equal(await page.locator('footer').count(), 0);
   assert.equal(await warnsOnLeave(page), false);
   await page.locator('#theme').selectOption('light');
   await page.locator('[data-layout="split"]').click();
-  assert.equal(await warnsOnLeave(page), false);
-  await page.locator('[data-viewed="0"]').check();
-  assert.equal(await warnsOnLeave(page), true);
-  await page.locator('[data-viewed="0"]').uncheck();
-  assert.equal(await warnsOnLeave(page), false, 'reverting Viewed to its baseline leaves no uncopied change');
+  assert.equal(await page.evaluate(() => localStorage.length), 0, 'presentation does not write feedback');
+  await page.locator('[data-viewed="1"]').check();
   await page.locator('#file-0 [data-action="file-comment"]').click();
-  await page.locator('#comment-text').fill('Unfinished feedback');
-  assert.equal(await warnsOnLeave(page), true);
-  await page.locator('#comment-text').fill('');
-  assert.equal(await warnsOnLeave(page), false);
   await page.locator('#comment-text').fill('Saved feedback');
   await page.locator('#composer button[type="submit"]').click();
-  assert.equal(await warnsOnLeave(page), true);
-  await copyFeedback(page);
-  assert.equal(await warnsOnLeave(page), false);
-  await page.locator('[data-action="edit-root"]').click();
-  assert.equal(await warnsOnLeave(page), false, 'opening an unchanged edit is not a new draft');
-  await page.locator('#comment-text').fill('Edited feedback');
-  assert.equal(await warnsOnLeave(page), true);
-  await page.locator('#composer button[type="submit"]').click();
-  await copyFeedback(page);
-  await page.locator('#file-0 [data-action="reply"]').click();
+  await page.locator('#thread-u-1 [data-action="reply"]').click();
   await page.locator('#comment-text').fill('A reply');
   await page.locator('#composer button[type="submit"]').click();
-  assert.equal(await warnsOnLeave(page), true);
-  await copyFeedback(page);
   assert.equal(await warnsOnLeave(page), false);
+  await reloadReview(page);
+  assert.equal(await page.locator('[data-viewed="1"]').isChecked(), true);
+  assert.match(await page.locator('#thread-u-1').textContent(), /Saved feedback.*A reply/s);
+  assert.equal(await warnsOnLeave(page), false);
+  await page.locator('#thread-u-1 [data-action="edit-root"]').click();
+  await page.locator('#comment-text').fill('Edited feedback');
+  await page.locator('#composer button[type="submit"]').click();
+  await page.locator('#thread-u-1 [data-action="edit-reply"]').click();
+  await page.locator('#comment-text').fill('Edited reply');
+  await page.locator('#composer button[type="submit"]').click();
+  await reloadReview(page);
+  assert.match(await page.locator('#thread-u-1').textContent(), /Edited feedback.*Edited reply/s);
+  await page.locator('#file-0 [data-action="file-comment"]').click();
+  await page.locator('#comment-text').fill('Another comment');
+  await page.locator('#composer button[type="submit"]').click();
+  assert.equal(await page.locator('#thread-u-3').count(), 1, 'restoring must not reuse thread or reply IDs');
+  await page.locator('[data-action="export"]').click();
+  const output = await page.locator('#markdown-output').inputValue();
+  assert.match(output, /Edited feedback/); assert.match(output, /Edited reply/); assert.match(output, /Another comment/);
+  await page.locator('[data-action="close-export"]').click();
   for (const action of ['delete-reply', 'delete-root']) {
     page.once('dialog', dialog => dialog.accept());
-    await page.locator(`[data-action="${action}"]`).click();
-    assert.equal(await warnsOnLeave(page), true, `${action} changes the previously copied feedback`);
-    await copyFeedback(page);
+    await page.locator(`#thread-u-1 [data-action="${action}"]`).click();
     assert.equal(await warnsOnLeave(page), false);
+    await reloadReview(page);
+    assert.equal(await page.locator(action === 'delete-reply' ? '#thread-u-1 .reply' : '#thread-u-1').count(), 0);
   }
 });
 
-test('failed or pending copies do not clear the warning; a delayed success only covers the text it actually copied', options, async t => {
+test('failed or pending copies do not affect persistence or the leave guard', options, async t => {
   const page = await pageFor(t);
   await page.locator('[data-viewed="0"]').check();
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }));
   await page.locator('[data-action="export"]').click();
   await page.waitForFunction(() => document.getElementById('copy-status').textContent.includes('Automatic copy is unavailable'));
-  assert.equal(await warnsOnLeave(page), true);
+  assert.equal(await warnsOnLeave(page), false);
   await page.locator('[data-action="close-export"]').click();
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
     writeText: () => new Promise(resolve => { window.finishCopy = resolve; })
   } }));
   await page.locator('[data-action="export"]').click();
-  assert.equal(await warnsOnLeave(page), true);
+  assert.equal(await warnsOnLeave(page), false);
   await page.locator('[data-action="close-export"]').click();
   await page.locator('[data-viewed="1"]').check();
   await page.evaluate(() => window.finishCopy());
-  assert.equal(await warnsOnLeave(page), true, 'the second Viewed change was not in the pending copy');
-  await page.locator('[data-viewed="1"]').uncheck();
-  assert.equal(await warnsOnLeave(page), false, 'the first version was copied even after its dialog closed');
+  assert.equal(await warnsOnLeave(page), false);
+  await reloadReview(page);
+  assert.equal(await page.locator('[data-viewed="0"]').isChecked(), true);
+  assert.equal(await page.locator('[data-viewed="1"]').isChecked(), true);
 });
 
-test('only a complete trusted manual export copy clears the warning', options, async t => {
+test('only a complete trusted manual export copy reports clipboard success', options, async t => {
   const page = await pageFor(t);
   // Capture the native-copy observer so the test never writes to the OS clipboard.
   await page.addInitScript(() => {
@@ -391,31 +422,174 @@ test('only a complete trusted manual export copy clears the warning', options, a
   await page.waitForFunction(() => document.getElementById('copy-status').textContent.includes('Automatic copy is unavailable'));
   await page.locator('#markdown-output').evaluate(el => { el.focus(); el.setSelectionRange(0, 10); });
   await page.evaluate(() => window.reviewCopy({ isTrusted: true, defaultPrevented: false }));
-  assert.equal(await warnsOnLeave(page), true, 'partial export copies do not protect the entire review');
+  assert.match(await page.locator('#copy-status').textContent(), /Automatic copy is unavailable/);
   await page.locator('[data-action="select-output"]').click();
   await page.evaluate(() => document.dispatchEvent(new ClipboardEvent('copy', { bubbles: true })));
-  assert.equal(await warnsOnLeave(page), true, 'synthetic copy events are not proof of copying');
+  assert.match(await page.locator('#copy-status').textContent(), /Automatic copy is unavailable/);
   await page.evaluate(() => window.reviewCopy({ isTrusted: true, defaultPrevented: true }));
-  assert.equal(await warnsOnLeave(page), true, 'cancelled copy events do not count');
+  assert.match(await page.locator('#copy-status').textContent(), /Automatic copy is unavailable/);
   await page.evaluate(() => window.reviewCopy({ isTrusted: true, defaultPrevented: false }));
   assert.equal(await warnsOnLeave(page), false);
   assert.equal(await page.locator('#copy-status').textContent(), 'Copied to clipboard.');
 });
 
-test('closing an uncopied draft raises a native confirmation; after copying the review it closes without one', options, async t => {
-  const page = await pageFor(t);
+test('closing a persisted draft needs no confirmation and reopening the same HTML restores it', options, async t => {
+  const page = await pageFor(t), context = page.context();
   await page.locator('#file-0 [data-action="file-comment"]').click();
-  await page.locator('#comment-text').fill('Protect this draft on close');
-  const warning = page.waitForEvent('dialog');
-  await page.close({ runBeforeUnload: true });
-  const dialog = await warning;
-  assert.equal(dialog.type(), 'beforeunload');
-  await dialog.dismiss();
-  assert.equal(await page.locator('#comment-text').inputValue(), 'Protect this draft on close');
-  await page.locator('#composer button[type="submit"]').click();
-  await copyFeedback(page);
-  assert.equal(await warnsOnLeave(page), false);
+  await page.locator('#comment-text').fill('Keep this draft after closing');
+  let dialogs = 0;
+  page.on('dialog', dialog => { dialogs++; void dialog.accept(); });
   await Promise.all([page.waitForEvent('close'), page.close({ runBeforeUnload: true })]);
+  assert.equal(dialogs, 0);
+  const reopened = await context.newPage();
+  await reopened.goto(url);
+  await reopened.locator('#comment-text').waitFor();
+  assert.equal(await reopened.locator('#comment-text').inputValue(), 'Keep this draft after closing');
+  assert.equal(await warnsOnLeave(reopened), false);
+});
+
+test('range drafts and root/reply edits restore their targets and original text, while cancellation removes the draft', options, async t => {
+  const page = await pageFor(t);
+  await lineControl(page, 0, 'new', 22).click();
+  await lineControl(page, 0, 'new', 18).click({ modifiers: ['Shift'] });
+  await page.locator('#comment-text').fill('Range draft');
+  await page.locator('[data-action="select-end"]').click();
+  await lineControl(page, 0, 'new', 19).click();
+  await page.locator('[data-action="preview-tab"]').click();
+  await reloadReview(page);
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Range draft');
+  assert.equal(await page.locator('#comment-range').textContent(), 'new L19–L22');
+  assert.equal(await page.locator('#comment-text').isVisible(), true);
+  await lineControl(page, 0, 'new', 23).click({ modifiers: ['Shift'] });
+  assert.equal(await page.locator('#comment-range').textContent(), 'new L22–L23', 'restore the original range origin');
+  await page.locator('#comment-text').press('Control+Enter');
+  await page.locator('#thread-u-1 [data-action="edit-root"]').click();
+  await page.locator('#comment-text').fill('Changed root draft');
+  await reloadReview(page);
+  assert.equal(await page.locator('#composer button[type="submit"]').textContent(), 'Save changes');
+  page.once('dialog', dialog => dialog.dismiss());
+  await page.locator('[data-action="cancel-comment"]').click();
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Changed root draft', 'restoring must not turn a changed edit into an unchanged edit');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('[data-action="cancel-comment"]').click();
+  await reloadReview(page);
+  assert.equal(await page.locator('#composer').count(), 0);
+  assert.match(await page.locator('#thread-u-1').textContent(), /Range draft/);
+  await page.locator('#thread-u-1 [data-action="reply"]').click();
+  await page.locator('#comment-text').fill('Reply draft');
+  await reloadReview(page);
+  assert.equal(await page.locator('#composer button[type="submit"]').textContent(), 'Add reply');
+  await page.locator('#composer button[type="submit"]').click();
+  await page.locator('#thread-u-1 [data-action="edit-reply"]').click();
+  await page.locator('#comment-text').fill('Changed reply');
+  await reloadReview(page);
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Changed reply');
+  await page.locator('#composer button[type="submit"]').click();
+  await reloadReview(page);
+  assert.equal(await page.locator('#composer').count(), 0);
+  assert.match(await page.locator('#thread-u-1 .reply').textContent(), /Changed reply/);
+});
+
+test('storage failures retain the leave confirmation; copying does not hide the failure and retry restores saving', options, async t => {
+  for (const name of ['QuotaExceededError', 'SecurityError']) {
+    const page = await pageFor(t);
+    await page.evaluate(name => {
+      window.nativeSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = () => { throw new DOMException('Storage unavailable', name); };
+    }, name);
+    await page.locator('[data-viewed="0"]').check();
+    assert.equal(await page.locator('#storage-warning').isVisible(), true);
+    assert.equal(await warnsOnLeave(page), true);
+    await page.locator('[data-viewed="0"]').uncheck();
+    assert.equal(await warnsOnLeave(page), false, 'reverting to the original snapshot does not risk data loss');
+    await page.locator('#file-0 [data-action="file-comment"]').click();
+    assert.equal(await warnsOnLeave(page), false, 'an empty editor is not unsaved feedback');
+    await page.locator('#comment-text').fill('Protect this unsaved draft');
+    const warning = page.waitForEvent('dialog');
+    await page.close({ runBeforeUnload: true });
+    const dialog = await warning;
+    assert.equal(dialog.type(), 'beforeunload');
+    await dialog.dismiss();
+    assert.equal(await page.locator('#comment-text').inputValue(), 'Protect this unsaved draft');
+    await page.locator('#composer button[type="submit"]').click();
+    await copyFeedback(page);
+    assert.equal(await warnsOnLeave(page), true, 'clipboard success is not persistence success');
+    await page.evaluate(() => { Storage.prototype.setItem = window.nativeSetItem; });
+    await page.locator('[data-action="retry-save"]').click();
+    assert.equal(await page.locator('#storage-warning').isVisible(), false);
+    assert.equal(await warnsOnLeave(page), false);
+    await reloadReview(page);
+    assert.match(await page.locator('#thread-u-1').textContent(), /Protect this unsaved draft/);
+  }
+});
+
+test('unavailable storage on startup does not prevent reviewing or silently enable overwriting an unread cache', options, async t => {
+  const page = await pageFor(t);
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.addInitScript(() => Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Denied', 'SecurityError'); } }));
+  await reloadReview(page);
+  assert.equal(await page.locator('#storage-warning').isVisible(), true);
+  assert.equal(await warnsOnLeave(page), false);
+  await page.locator('#file-0 [data-action="file-comment"]').click();
+  await page.locator('#comment-text').fill('Still editable without storage');
+  assert.equal(await warnsOnLeave(page), true);
+  assert.deepEqual(errors, []);
+});
+
+test('malformed and unsafe caches are rejected without crashing or overwriting their contents', options, async t => {
+  const page = await pageFor(t), key = await storageKey(page);
+  const saved = { version: 1, sequence: 2, editor: null, feedback: Array.from({ length: 4 }, () => ({ viewed: false, threads: [] })) };
+  saved.feedback[0].threads.push({ id: 'u-1', author: 'You', text: 'Cached comment', replies: [{ id: 'u-2', text: 'Cached reply' }] });
+  const variants = ['{', 'null'];
+  for (const corrupt of [
+    value => { value.version = 2; },
+    value => { value.feedback.pop(); },
+    value => { value.sequence = 0; },
+    value => { value.feedback[0].viewed = 'true'; },
+    value => { value.feedback[0].threads[0].id = 'u-1" onclick="window.pwned=true'; },
+    value => { value.feedback[0].threads[0].author = '<img src=x onerror=window.pwned=true>'; },
+    value => { value.feedback[0].threads[0].replies[0].id = 'u-1'; },
+    value => { Object.assign(value.feedback[0].threads[0], { line: 1, endLine: 1000, side: 'new' }); },
+    value => { Object.assign(value.feedback[0].threads[0], { line: 20, endLine: 19, side: 'new' }); },
+    value => { value.editor = { file: 10, text: 'Draft', initialText: '' }; },
+    value => { value.editor = { file: 0, text: 'Draft', initialText: '', thread: 'missing' }; },
+    value => { value.editor = { file: 0, text: 'Draft', initialText: '', thread: 'u-1', reply: 'missing' }; },
+  ]) {
+    const value = structuredClone(saved); corrupt(value); variants.push(JSON.stringify(value));
+  }
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  for (const raw of variants) {
+    await page.evaluate(({ key, raw }) => localStorage.setItem(key, raw), { key, raw });
+    await reloadReview(page);
+    assert.equal(await page.locator('#storage-warning').isVisible(), true);
+    assert.equal(await page.locator('#file-0 .thread').count(), 0);
+    assert.equal(await page.evaluate(key => localStorage.getItem(key), key), raw, 'startup must not overwrite a damaged cache');
+  }
+  await page.locator('#file-0 [data-action="file-comment"]').click();
+  await page.locator('#comment-text').fill('New draft while restore failed');
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), key), variants.at(-1), 'changes must not silently replace an unread cache');
+  assert.equal(await warnsOnLeave(page), true);
+  assert.equal(await page.evaluate(() => window.pwned), undefined);
+  assert.deepEqual(errors, []);
+});
+
+test('changing a snapshot at the same file URL isolates feedback even with identical timestamps and paths', options, async t => {
+  const page = await pageFor(t);
+  const review = await page.evaluate(() => JSON.parse(document.getElementById('review-data').textContent));
+  const output = path.join(artifacts, 'storage-isolation.html'), isolated = pathToFileURL(output).href;
+  const original = renderHTML(review); fs.writeFileSync(output, original);
+  await page.goto(isolated); await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  const firstKey = await storageKey(page);
+  await page.locator('[data-viewed="0"]').check();
+  review.files[1].after.text = 'changed\n'; review.files[1].patch = createPatch('file', '', 'changed\n');
+  fs.writeFileSync(output, renderHTML(review));
+  await reloadReview(page);
+  assert.notEqual(await storageKey(page), firstKey);
+  assert.equal(await page.locator('[data-viewed="0"]').isChecked(), false);
+  assert.ok(await page.evaluate(key => localStorage.getItem(key), firstKey), 'other snapshots are not cleaned up');
+  fs.writeFileSync(output, original);
+  await reloadReview(page);
+  assert.equal(await page.locator('[data-viewed="0"]').isChecked(), true);
 });
 
 test('clipboard waiting is visible and prevents duplicate requests without blocking manual copy or closing', options, async t => {

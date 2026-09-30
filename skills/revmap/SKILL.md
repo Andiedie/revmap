@@ -62,6 +62,6 @@ npx --yes revmap --input /absolute/path/to/temporary-review.json
 
 The CLI prints a `file://` URL and opens the default browser, then exits. `--no-open` only generates the page and prints its URL. If browser launch fails, hand the printed URL to the user; the generated page is still usable.
 
-The page contains the snapshot and all its assets. It needs no server or model connection. Review state lives only in the current page; refreshing loses comments and Viewed state. The generated file contains selected source code, so treat it as sensitive and share it only at the user's request.
+The page contains the snapshot and all its assets. It needs no server or model connection. Viewed, comments, replies and changed drafts save in browser-local storage for this snapshot. When storage is available, refreshing or reopening the same HTML in the same browser restores them; generating a new review does not migrate feedback. The generated file contains selected source code, so treat it as sensitive and share it only at the user's request.
 
 Tell the user the page is ready and provide the URL. The human can comment on files/lines, reply to notes, mark files Viewed, and use **Copy review**. The exported Markdown includes the Viewed checklist, human feedback, and any Agent note needed as reply context. No automated return channel or later synchronization exists; a later review is a fresh invocation chosen by the user and agent.

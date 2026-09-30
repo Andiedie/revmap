@@ -9,8 +9,8 @@ const markdown = (text: string) => md.render(text).replace(/<a /g, '<a target="_
 const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14M7 8h7a3 3 0 0 1 3 3v8"/><circle cx="7" cy="5" r="2"/><circle cx="7" cy="19" r="2"/><circle cx="17" cy="19" r="2"/></svg>';
 interface FileState extends Feedback { open: boolean; loaded: boolean; budget: number; ranges: Range[]; rows?: Row[] }
 const states: FileState[] = initialFeedback(review).map((feedback, i) => ({ ...feedback, open: review.files[i].priority !== 'low', loaded: false, budget: 600, ranges: [] }));
-let copiedReview = exportMarkdown(review, states);
 interface Editor { file: number; text: string; initialText?: string; originLine?: number; anchor?: Note; thread?: string; reply?: string; editRoot?: boolean; preview?: boolean; error?: string; invalid?: 'text'; selectingEnd?: boolean }
+interface SavedFeedback { version: 1; feedback: Feedback[]; editor: Pick<Editor, 'file' | 'text' | 'initialText' | 'originLine' | 'anchor' | 'thread' | 'reply' | 'editRoot'> | null; sequence: number }
 interface Drag { pointer: number; target: HTMLElement; file: number; side: Side; first: number; last: number; x: number; y: number; moved: boolean }
 let drag: Drag | null = null, dragFrame = 0, ignorePointerClick = false;
 let editor: Editor | null = null, sequence = 0, copyAttempt = 0, layout = 'unified', filter = '', query = '', navOpen = false;
@@ -18,6 +18,8 @@ const mobile = matchMedia('(max-width: 760px)');
 const dark = matchMedia('(prefers-color-scheme: dark)');
 let theme = 'system';
 const app = document.getElementById('app')!;
+const storageKey = document.querySelector<HTMLMetaElement>('meta[name="revmap-storage-key"]')!.content;
+let savedFeedback = feedbackString(), restoreFailed = false;
 
 function button(action: string, text: string, attributes = '', classes = ''): string {
   return `<button type="button" class="${classes}" data-action="${action}" ${attributes}>${text}</button>`;
@@ -38,7 +40,7 @@ app.innerHTML = `
   <header class="topbar"><a class="brand" href="#">${icon}<span>revmap</span></a><span class="repo-name">${escape(review.repository)}</span><span class="local-badge">Local snapshot</span>
     <label class="theme-control"><span class="sr-only">Theme</span><select id="theme"><option value="system">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   </header>
-  <div class="review-heading"><div><div class="eyebrow">REVIEW MAP</div><h1>Review changes <span class="count">${review.files.length}</span></h1><p class="snapshot"><code>${review.base ? escape(review.base.slice(0, 8)) : 'empty'}</code><span>→</span>Working tree<span class="snapshot-time">· ${escape(new Date(review.createdAt).toLocaleString())}</span></p></div>
+  <div class="review-heading"><div><div class="eyebrow">REVIEW MAP</div><h1>Review changes <span class="count">${review.files.length}</span></h1><p class="snapshot"><code>${review.base ? escape(review.base.slice(0, 8)) : 'empty'}</code><span>→</span>Working tree<span class="snapshot-time">· ${escape(new Date(review.createdAt).toLocaleString())}</span></p><div id="storage-warning" class="error" role="alert" hidden><span></span> ${button('retry-save', 'Retry save')}</div></div>
     <div class="heading-actions">${button('nav', 'Files', 'aria-expanded="false" aria-controls="sidebar"', 'mobile-nav')}${button('export', 'Copy review <span aria-hidden="true">↗</span>', '', 'primary copy-review')}</div>
   </div>
   <div class="workspace"><aside id="sidebar"><div class="sidebar-top"><h2>Review order</h2><span id="progress-text"></span></div><progress id="progress" max="${review.files.length}" value="0" aria-label="Files viewed"></progress>
@@ -52,6 +54,90 @@ app.innerHTML = `
   <dialog id="export-dialog" aria-labelledby="export-title"><div class="dialog-heading"><h2 id="export-title">Review feedback</h2>${button('close-export', 'Close')}</div><label for="markdown-output">Markdown</label><textarea id="markdown-output" readonly spellcheck="false"></textarea><div class="export-bottom"><p id="copy-status" role="status"></p><div>${button('select-output', 'Select all')}${button('copy-output', 'Copy Markdown', '', 'primary')}</div></div></dialog>`;
 
 function hasDraft(): boolean { return !!(editor && (editor.text.trim() || editor.initialText?.trim())); }
+function anchorData({ text, line, endLine, side }: Note): Note { return { text, line, endLine, side }; }
+function feedbackSnapshot(): SavedFeedback {
+  let draft: SavedFeedback['editor'] = null;
+  if (editor && hasDraft() && editor.text !== editor.initialText) {
+    const { file, text, initialText, originLine, anchor, thread, reply, editRoot } = editor;
+    draft = { file, text, initialText, originLine, anchor, thread, reply, editRoot };
+  }
+  return { version: 1, feedback: states.map(({ viewed, threads }) => ({ viewed, threads })), editor: draft, sequence };
+}
+function feedbackString(data = feedbackSnapshot()): string { return JSON.stringify({ feedback: data.feedback, editor: data.editor }); }
+function storageWarning(message: string): void {
+  const warning = document.getElementById('storage-warning')!;
+  warning.hidden = !message;
+  warning.querySelector('span')!.textContent = message;
+  warning.querySelector('button')!.textContent = restoreFailed ? 'Reload' : 'Retry save';
+}
+function saveFeedback(force = false): void {
+  if (restoreFailed) return; // Keep an unread cache intact; recovery requires a reload.
+  const data = feedbackSnapshot(), current = feedbackString(data);
+  if (!force && current === savedFeedback) return;
+  try {
+    // ponytail: one writer per snapshot; concurrent tabs need conflict handling.
+    localStorage.setItem(storageKey, JSON.stringify(data));
+    savedFeedback = current;
+    storageWarning('');
+  } catch {
+    storageWarning('Browser save failed. Leaving may lose your changes.');
+  }
+}
+function restoreFeedback(): void {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw === null) return;
+    const saved = JSON.parse(raw) as SavedFeedback;
+    if (!saved || saved.version !== 1 || !Number.isSafeInteger(saved.sequence) || saved.sequence < 0 || saved.sequence >= Number.MAX_SAFE_INTEGER || !Array.isArray(saved.feedback) || saved.feedback.length !== states.length) throw new Error('Invalid feedback');
+    const ids = new Set<string>();
+    const userId = (id: string) => typeof id === 'string' && /^u-[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id.slice(2))) && Number(id.slice(2)) <= saved.sequence;
+    const uniqueId = (id: string) => !ids.has(id) && !!ids.add(id);
+    const validAnchor = (note: Note, i: number): boolean => {
+      if (!note || typeof note.text !== 'string' || (note.side !== undefined && note.side !== 'old' && note.side !== 'new')) return false;
+      if (note.line === undefined) return note.endLine === undefined;
+      if (note.endLine !== undefined && !Number.isSafeInteger(note.endLine)) return false;
+      const end = note.endLine ?? note.line, max = lines((note.side === 'old' ? review.files[i].before : review.files[i].after)?.text).length;
+      return Number.isSafeInteger(note.line) && note.line > 0 && Number.isSafeInteger(end) && end >= note.line && end <= max;
+    };
+    if (!saved.feedback.every((feedback, i) => {
+      if (!feedback || typeof feedback.viewed !== 'boolean' || !Array.isArray(feedback.threads)) return false;
+      const originals = states[i].threads;
+      return feedback.threads.every(thread => {
+        if (!thread || !validAnchor(thread, i) || !Array.isArray(thread.replies)) return false;
+        if (thread.author === 'Agent') {
+          const original = originals.find(note => note.id === thread.id);
+          if (!original || thread.text !== original.text || thread.line !== original.line || thread.endLine !== original.endLine || thread.side !== original.side) return false;
+        } else if (thread.author !== 'You' || !userId(thread.id) || !thread.text.trim()) return false;
+        return uniqueId(thread.id) && thread.replies.every(reply => reply && userId(reply.id) && uniqueId(reply.id) && typeof reply.text === 'string' && !!reply.text.trim());
+      }) && originals.every(note => feedback.threads.some(thread => thread.id === note.id && thread.author === 'Agent'));
+    })) throw new Error('Invalid threads');
+    const draft = saved.editor;
+    if (draft !== null) {
+      if (!draft || !Number.isInteger(draft.file) || draft.file < 0 || draft.file >= states.length || typeof draft.text !== 'string' || typeof draft.initialText !== 'string' || (draft.editRoot !== undefined && typeof draft.editRoot !== 'boolean')) throw new Error('Invalid draft');
+      if (draft.thread !== undefined) {
+        const thread = saved.feedback[draft.file].threads.find(thread => thread.id === draft.thread);
+        const reply = thread?.replies.find(reply => reply.id === draft.reply);
+        if (!thread || draft.anchor !== undefined || draft.originLine !== undefined || (draft.editRoot && (thread.author !== 'You' || draft.reply !== undefined)) || (draft.reply !== undefined && !reply) || draft.initialText !== (draft.editRoot ? thread.text : reply ? reply.text : '')) throw new Error('Invalid draft target');
+      } else if (draft.editRoot || draft.reply !== undefined || draft.initialText !== '' || (draft.anchor !== undefined && !validAnchor(draft.anchor, draft.file))) throw new Error('Invalid draft anchor');
+      if (draft.originLine !== undefined && (!Number.isSafeInteger(draft.originLine) || draft.anchor?.line === undefined || draft.originLine < draft.anchor.line || draft.originLine > (draft.anchor.endLine ?? draft.anchor.line))) throw new Error('Invalid draft origin');
+    }
+    saved.feedback.forEach((feedback, i) => {
+      states[i].viewed = feedback.viewed;
+      states[i].open = !feedback.viewed && review.files[i].priority !== 'low';
+      states[i].threads = feedback.threads.map(thread => ({ ...anchorData(thread), id: thread.id, author: thread.author, replies: thread.replies.map(({ id, text }) => ({ id, text })) }));
+    });
+    sequence = saved.sequence;
+    if (draft) {
+      const { file, text, initialText, originLine, thread, reply, editRoot } = draft;
+      editor = { file, text, initialText, originLine, thread, reply, editRoot, anchor: draft.anchor && anchorData(draft.anchor) };
+      states[file].open = true; states[file].loaded = true;
+    }
+    savedFeedback = feedbackString();
+  } catch {
+    restoreFailed = true;
+    storageWarning('Saved feedback could not be restored. Changes are not being saved. Reload to retry.');
+  }
+}
 function draftBadge(i: number): string { return `<span class="draft-badge" data-draft-file="${i}" ${editor?.file === i && hasDraft() ? '' : 'hidden'}>Draft</span>`; }
 function updateNavigation(): void {
   const focusedFile = document.activeElement?.closest<HTMLElement>('.file-card');
@@ -229,7 +315,7 @@ function openEditor(next: Editor): void {
   states[next.file].loaded = true;
   if (previous !== undefined && previous !== next.file) renderFile(previous);
   renderFile(next.file); updateNavigation();
-  focusEditor();
+  saveFeedback(); focusEditor();
 }
 function saveComment(): void {
   if (!editor) return;
@@ -252,7 +338,7 @@ function saveComment(): void {
   const edited = editor.editRoot || editor.reply;
   const saved = thread || state.threads[state.threads.length - 1];
   editor = null;
-  renderFile(i); updateNavigation();
+  renderFile(i); updateNavigation(); saveFeedback();
   document.querySelector<HTMLElement>(`#thread-${saved.id} [data-action="reply"]`)?.focus();
   document.getElementById('announcement')!.textContent = edited ? 'Comment updated.' : 'Comment added to this review.';
 }
@@ -272,7 +358,6 @@ async function copyOutput(): Promise<void> {
   try {
     if (!navigator.clipboard?.writeText) throw new Error('unavailable');
     await navigator.clipboard.writeText(text);
-    copiedReview = text;
     if (attempt === copyAttempt && dialog.open) status.textContent = 'Copied to clipboard.';
   } catch {
     if (attempt === copyAttempt && dialog.open) {
@@ -313,7 +398,7 @@ function selectLines(i: number, side: Side, first: number, last = first, extend 
     editor.originLine = first;
     editor.anchor = { text: '', side, line: Math.min(first, last), endLine: Math.max(first, last) };
     editor.selectingEnd = false; editor.preview = false; editor.error = undefined; editor.invalid = undefined;
-    renderFile(i); focusEditor();
+    renderFile(i); saveFeedback(); focusEditor();
   } else openEditor({ file: i, text: '', originLine: first, anchor: { text: '', side, line: Math.min(first, last), endLine: Math.max(first, last) } });
 }
 function updateDrag(): void {
@@ -423,16 +508,17 @@ document.addEventListener('click', event => {
     case 'delete-root':
       if (!confirm(thread!.replies.length ? 'Delete this comment and all its replies?' : 'Delete this comment?')) return;
       if (editor?.thread === thread!.id) editor = null;
-      states[i].threads = states[i].threads.filter(t => t !== thread); renderFile(i); updateNavigation(); break;
+      states[i].threads = states[i].threads.filter(t => t !== thread); renderFile(i); updateNavigation(); saveFeedback(); break;
     case 'delete-reply':
       if (!confirm('Delete this reply?')) return;
       if (editor?.reply === target.dataset.reply) editor = null;
-      thread!.replies = thread!.replies.filter(r => r.id !== target.dataset.reply); renderFile(i); updateNavigation(); break;
+      thread!.replies = thread!.replies.filter(r => r.id !== target.dataset.reply); renderFile(i); updateNavigation(); saveFeedback(); break;
     case 'cancel-comment': {
       if (!canReplaceEditor()) return;
-      const previous = editor!; editor = null; renderFile(previous.file); updateNavigation(); returnFromEditor(previous); break;
+      const previous = editor!; editor = null; renderFile(previous.file); updateNavigation(); saveFeedback(); returnFromEditor(previous); break;
     }
     case 'write-tab': case 'preview-tab': editor!.preview = action === 'preview-tab'; renderFile(editor!.file); if (!editor!.preview) focusEditor(); break;
+    case 'retry-save': if (restoreFailed) window.location.reload(); else saveFeedback(true); break;
     case 'export': exportReview(); break;
     case 'copy-output': void copyOutput(); break;
     case 'select-output': { const el = document.getElementById('markdown-output') as HTMLTextAreaElement; el.focus(); el.select(); break; }
@@ -460,6 +546,7 @@ document.addEventListener('input', event => {
   if (el.id === 'comment-text' && editor) {
     editor.text = el.value;
     document.querySelectorAll<HTMLElement>(`[data-draft-file="${editor.file}"]`).forEach(badge => badge.hidden = !hasDraft());
+    saveFeedback();
   }
   if (el.id === 'search') { query = el.value.toLowerCase(); updateNavigation(); }
 });
@@ -470,21 +557,19 @@ document.addEventListener('change', event => {
     const i = Number(el.dataset.viewed);
     states[i].viewed = el.checked; states[i].open = !el.checked;
     if (!el.checked && !isLarge(i)) states[i].loaded = true;
-    renderFile(i); updateNavigation();
+    renderFile(i); updateNavigation(); saveFeedback();
   }
   if (el.id === 'theme') { theme = el.value; applyTheme(); }
 });
 window.addEventListener('beforeunload', event => {
-  const changedDraft = hasDraft() && editor!.text !== editor!.initialText;
-  if (!changedDraft && exportMarkdown(review, states) === copiedReview) return;
+  if (feedbackString() === savedFeedback) return;
   event.preventDefault();
   event.returnValue = '';
 });
 document.addEventListener('copy', event => {
   const output = document.getElementById('markdown-output') as HTMLTextAreaElement;
-  // Native copy has no completion callback; only a trusted, complete export copy counts.
+  // Native copy has no completion callback; only a trusted, complete copy reports success.
   if (!event.isTrusted || event.defaultPrevented || document.activeElement !== output || output.selectionStart !== 0 || output.selectionEnd !== output.value.length) return;
-  copiedReview = output.value;
   copyAttempt++;
   (document.querySelector('[data-action="copy-output"]') as HTMLButtonElement).disabled = false;
   document.getElementById('copy-status')!.textContent = 'Copied to clipboard.';
@@ -498,9 +583,11 @@ document.addEventListener('keydown', event => {
 });
 mobile.addEventListener('change', () => { states.forEach((s, i) => { if (s.open && s.loaded) renderFile(i); }); setNav(false); });
 dark.addEventListener('change', applyTheme);
+restoreFeedback();
 applyTheme();
 states.forEach((_, i) => renderFile(i));
 updateNavigation();
+if (editor) focusEditor();
 if ('IntersectionObserver' in window) {
   const observer = new IntersectionObserver(entries => {
     for (const entry of entries) {

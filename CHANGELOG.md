@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Automatically save Viewed, comments, replies and changed drafts in browser-local storage per review snapshot; restore them when refreshing or reopening the same HTML in the same browser.
+- Warn before leaving only when changes have not been saved. Show storage failures with a retry action, and keep unreadable caches intact instead of overwriting them.
+- Fix clipped inline reply inputs and submit buttons in narrow layouts and horizontally scrolled diffs.
+- Publish through GitHub Actions with npm OIDC trusted publishing, after typecheck, Node tests and Chromium browser tests pass.
+
 ## 0.1.0
 
 Initial release.

@@ -12,7 +12,9 @@ test('CLI reports actionable errors, generates private standalone HTML, and pres
   const outputs = [];
   const run = (args, env = process.env) => spawnSync(process.execPath, [cli, ...args], { cwd: dir, env, encoding: 'utf8' });
   try {
-    assert.match(run(['--help']).stdout, /--input/);
+    const help = run(['--help']).stdout;
+    assert.match(help, /--input/);
+    assert.match(help, /feedback saves in browser-local storage/);
     assert.equal(run([]).status, 1);
     assert.match(run([]).stderr, /Missing --input/);
     assert.equal(run(['--surprise']).status, 1);

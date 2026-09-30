@@ -27,7 +27,7 @@ function openBrowser(url: string): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) {
-    console.log(`revmap — a local, agent-guided review map\n\nUsage: revmap --input <review.json> [--no-open]\n\nRun inside a Git repository. Input paths are relative to its root.\n--input    JSON file containing {"base"?: "commit", "files": [{"path": "src/app.ts"}]}\n--no-open  Generate HTML without launching the default browser.\n--version  Print the package version.\n\nWithout base: HEAD to working tree, including selected untracked files.\nWith base: that commit to working tree, including uncommitted changes.\nThe temporary HTML is self-contained; comments reset on refresh.`);
+    console.log(`revmap — a local, agent-guided review map\n\nUsage: revmap --input <review.json> [--no-open]\n\nRun inside a Git repository. Input paths are relative to its root.\n--input    JSON file containing {"base"?: "commit", "files": [{"path": "src/app.ts"}]}\n--no-open  Generate HTML without launching the default browser.\n--version  Print the package version.\n\nWithout base: HEAD to working tree, including selected untracked files.\nWith base: that commit to working tree, including uncommitted changes.\nThe temporary HTML is self-contained; review feedback saves in browser-local storage.`);
     return;
   }
   if (args.length === 1 && args[0] === '--version') { console.log(PACKAGE_VERSION); return; }

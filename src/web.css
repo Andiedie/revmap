@@ -788,7 +788,7 @@ progress::-moz-progress-bar {
   padding: 12px !important;
 }
 .discussion-row .thread,
-.discussion-row .composer,
+.discussion-row > td > .composer,
 .context-actions {
   position: sticky;
   left: 12px;
@@ -1342,7 +1342,7 @@ dialog label {
     padding: 8px !important;
   }
   .discussion-row .thread,
-  .discussion-row .composer,
+  .discussion-row > td > .composer,
   .context-actions {
     left: 8px;
     width: min(900px, calc(100cqw - 16px));

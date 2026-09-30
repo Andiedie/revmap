@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4
+
+- Add review-wide context and feedback, plus ordered single-level file groups with group comments. Group folding keeps headings and discussions visible; Viewed remains per file.
+- Include review and group discussions in comment navigation, draft recovery, and Copy feedback, preserving the supplied reading order and exporting feedback across all filters.
+- Give file-level notes a distinct context style instead of presenting them like inline code discussions.
+- Follow the system light/dark preference automatically, remove the manual theme control and Local snapshot badge, and label human comments and exported feedback as User instead of You.
+- Keep flat review inputs and existing file-only feedback caches compatible; update the bundled Skill and example for review-wide and grouped plans.
+
 ## 0.1.3
 
 - Keep file and discussion navigation, diff layout controls, and Copy feedback in a fixed review toolbar; file headers stay visible directly below it.

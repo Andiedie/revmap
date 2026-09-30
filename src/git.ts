@@ -129,8 +129,10 @@ export function createReview(input: ReviewInput, cwd = process.cwd()): Review {
   try { root = realpathSync(output(cwd, ['rev-parse', '--show-toplevel'])); }
   catch (error) { throw new Error(`repository: not an accessible Git worktree; run revmap inside a Git repository. ${(error as Error).message}`); }
   const base = resolveBase(root, input.base);
-  const files = input.files.map((selected, index): ReviewFile => {
-    const field = `files[${index}]`;
+  const selectedFiles = input.groups
+    ? input.groups.flatMap((group, g) => group.files.map((selected, i) => ({ selected, field: `groups[${g}].files[${i}]` })))
+    : input.files!.map((selected, i) => ({ selected, field: `files[${i}]` }));
+  const files = selectedFiles.map(({ selected, field }): ReviewFile => {
     let beforeSnapshot: Snapshot | null;
     let afterSnapshot: Snapshot | null;
     try {
@@ -178,5 +180,8 @@ export function createReview(input: ReviewInput, cwd = process.cwd()): Review {
       patch: binary || status === 'unchanged' ? '' : patch(beforeSnapshot, afterSnapshot),
     };
   });
-  return { repository: basename(root), base, createdAt: new Date().toISOString(), files };
+  let offset = 0;
+  const groups = input.groups?.map(group => ({ title: group.title, comments: group.comments ?? [], files: group.files.map(() => offset++) }));
+  return { repository: basename(root), base, createdAt: new Date().toISOString(), files,
+    ...(input.comments === undefined ? {} : { comments: input.comments }), ...(groups === undefined ? {} : { groups }) };
 }

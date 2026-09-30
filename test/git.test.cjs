@@ -68,6 +68,34 @@ test('input errors identify the field and reject malformed, unknown, duplicate, 
   for (const [value, expected] of cases) assert.throws(() => parseInput(value), expected);
 });
 
+test('grouped input preserves reading order and context, rejects ambiguous scope, and reports original field paths', t => {
+  const root = repo(t);
+  write(root, 'a', 'first\nsecond\n'); write(root, 'b', 'other\n');
+  const input = { comments: [{ text: 'Review scope' }], groups: [
+    { title: 'Behavior', comments: [{ text: 'Why these files belong together' }], files: [{ path: 'b', priority: 'high' }] },
+    { title: 'Support', files: [{ path: 'a', priority: 'low', comments: [{ text: 'Check the line', line: 2 }] }] }
+  ] };
+  const result = createReview(parseInput(JSON.stringify(input)), root);
+  assert.deepEqual(result.files.map(file => file.path), ['b', 'a']);
+  assert.deepEqual(result.comments, [{ text: 'Review scope' }]);
+  assert.deepEqual(result.groups, [
+    { title: 'Behavior', comments: [{ text: 'Why these files belong together' }], files: [0] },
+    { title: 'Support', comments: [], files: [1] }
+  ]);
+  for (const [value, expected] of [
+    [{ ...input, files: [{ path: 'a' }] }, /input:.*files or groups/],
+    [{ groups: [] }, /groups:/],
+    [{ groups: [{ title: 'Empty', files: [] }] }, /groups\[0\].files:/],
+    [{ groups: [{ title: '', files: [{ path: 'a' }] }] }, /groups\[0\].title:/],
+    [{ ...input, comments: [{ text: 'wrong scope', line: 1 }] }, /comments\[0\].line:/],
+    [{ groups: [{ title: 'A', comments: [{ text: 'wrong scope', side: 'old' }], files: [{ path: 'a' }] }] }, /groups\[0\].comments\[0\].side:/],
+    [{ groups: [{ title: 'A', files: [{ path: 'a' }] }, { title: 'B', files: [{ path: 'a' }] }] }, /groups\[1\].files\[0\].path: duplicate/],
+    [{ groups: [{ title: 'A', files: [{ title: 'Nested', files: [{ path: 'a' }] }] }] }, /groups\[0\].files\[0\].title:/]
+  ]) assert.throws(() => parseInput(value), expected);
+  assert.throws(() => createReview({ groups: [{ title: 'A', files: [{ path: 'missing' }] }] }, root), /groups\[0\].files\[0\].path: absent/);
+  assert.throws(() => createReview({ groups: [{ title: 'A', files: [{ path: 'a', comments: [{ text: 'invalid', line: 3 }] }] }] }, root), /groups\[0\].files\[0\].comments\[0\].line: new side has 2 lines/);
+});
+
 test('zero commits: empty base, staged+unstaged final content, and only selected untracked files', t => {
   const root = repo(t);
   write(root, 'staged', 'staged\n');

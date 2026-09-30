@@ -8,7 +8,7 @@ const { renderHTML } = require('../dist/core.cjs');
 const enabled = process.env.REVMAP_EDGE_BROWSER === '1';
 const options = { skip: !enabled, timeout: 30000 };
 const artifacts = path.resolve('.test-output');
-let browser, url, toolbarURL;
+let browser, url, toolbarURL, scopesURL;
 before(async () => {
   if (!enabled) return;
   const old = Array.from({ length: 85 }, (_, i) => `const value${i + 1} = ${i + 1};`).join('\n') + '\n';
@@ -31,6 +31,12 @@ before(async () => {
   review.files[2].comments = [{ line: 2, text: 'Comment navigation also opens folded files.' }];
   review.files[3].comments = [{ line: 3, side: 'old', text: 'Deleted lines remain reachable.' }];
   const toolbar = path.join(artifacts, 'toolbar.html'); fs.writeFileSync(toolbar, renderHTML(review)); toolbarURL = pathToFileURL(toolbar).href;
+  review.comments = [{ text: 'Review the snapshot boundaries and how reviewers move through the changes.' }];
+  review.groups = [
+    { title: 'Snapshot <&> navigation', comments: [{ text: 'These files work together to keep reviewing local and predictable.' }], files: [0, 1] },
+    { title: 'Supporting changes', comments: [{ text: 'Check folded and deleted files after the main behavior.' }], files: [2, 3] }
+  ];
+  const scopes = path.join(artifacts, 'scopes.html'); fs.writeFileSync(scopes, renderHTML(review)); scopesURL = pathToFileURL(scopes).href;
   const { chromium, webkit } = require('playwright');
   const engine = process.env.PLAYWRIGHT_ENGINE === 'webkit' ? webkit : chromium;
   browser = await engine.launch(engine === webkit || process.env.PLAYWRIGHT_CHANNEL === 'bundled' ? {} : { channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome' });
@@ -44,6 +50,19 @@ async function pageFor(t, mobile = false) {
   await page.goto(url); await page.locator('#file-0 .code-row').first().waitFor();
   return page;
 }
+
+test('header omits snapshot and theme controls, and colors follow system changes without saving feedback', options, async t => {
+  const page = await pageFor(t);
+  assert.equal(await page.locator('.topbar .local-badge, .topbar select, .theme-control').count(), 0);
+  assert.doesNotMatch(await page.locator('.topbar').textContent(), /Local snapshot/);
+  assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'dark');
+  for (const [colorScheme, background] of [['light', 'rgb(255, 255, 255)'], ['dark', 'rgb(13, 17, 23)']]) {
+    await page.emulateMedia({ colorScheme });
+    await page.waitForFunction(scheme => getComputedStyle(document.documentElement).colorScheme === scheme, colorScheme);
+    assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), background);
+  }
+  assert.equal(await page.evaluate(() => localStorage.length), 0);
+});
 
 test('file disclosure is centered, borderless on hover, and usable through the filename and keyboard', options, async t => {
   const page = await pageFor(t);
@@ -286,6 +305,114 @@ test('Copy feedback copies all feedback inline, shows success and opens Markdown
   await page.locator('#export-dialog').waitFor({ state: 'visible' });
   assert.match(await page.locator('#copy-status').textContent(), /Automatic copy is unavailable/);
   assert.equal(await page.locator('#markdown-output').evaluate(el => el === document.activeElement && el.selectionStart === 0 && el.selectionEnd === el.value.length), true);
+});
+
+for (const mobile of [false, true]) test(`review and group context stay visible while folding, navigation reopens groups, and file notes differ from line notes on ${mobile ? 'mobile' : 'desktop'}`, options, async t => {
+  const page = await pageFor(t, mobile);
+  await page.goto(scopesURL); await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#review-overview').isVisible(), true);
+  assert.ok((await page.locator('#thread-a-review-0').boundingBox()).y < (mobile ? 844 : 1000), 'the overview must appear on first opening');
+  assert.deepEqual(await page.locator('#file-nav .nav-group').allTextContents(), ['Snapshot <&> navigation', 'Supporting changes']);
+  assert.equal(await page.locator('#group-0 .group-heading img').count(), 0);
+  await page.screenshot({ path: path.join(artifacts, `review-overview-${mobile ? 'mobile' : 'desktop'}.png`) });
+  const collapse = page.locator('#group-0 [data-action="toggle-group"]');
+  await collapse.click();
+  assert.equal(await page.locator('#file-0').isVisible(), false);
+  assert.equal(await page.locator('#thread-a-group-0-0').isVisible(), true);
+  assert.equal(await page.locator('[data-viewed="0"]').isChecked(), false);
+  if (mobile) await page.locator('[data-action="nav"]').click();
+  await page.locator('#file-nav [data-file="0"]').click();
+  assert.equal(await collapse.getAttribute('aria-expanded'), 'true');
+  const fileNote = page.locator('#thread-a-0-1'), lineNote = page.locator('#thread-a-0-0');
+  assert.equal(await fileNote.evaluate(el => el.classList.contains('context-thread')), true);
+  assert.equal(await lineNote.evaluate(el => el.classList.contains('context-thread')), false);
+  assert.notEqual(await fileNote.evaluate(el => getComputedStyle(el).borderRadius), await lineNote.evaluate(el => getComputedStyle(el).borderRadius));
+  await page.locator('#file-0 [data-action="file-comment"]').click();
+  await page.locator('#comment-text').fill('A file draft survives folding its group.');
+  assert.equal(await page.locator('[data-draft-group="0"]').isVisible(), true);
+  await collapse.click();
+  await page.locator('[data-action="export"]').click();
+  assert.equal(await collapse.getAttribute('aria-expanded'), 'true');
+  assert.equal(await page.locator('#comment-text').inputValue(), 'A file draft survives folding its group.');
+  assert.equal(await page.locator('#comment-text').evaluate(el => el === document.activeElement), true);
+  page.once('dialog', dialog => dialog.accept()); await page.locator('[data-action="cancel-comment"]').click();
+  await page.evaluate(() => scrollTo(0, 0));
+  const next = page.getByRole('button', { name: 'Next comment', exact: true });
+  for (const id of ['a-review-0', 'a-group-0-0', 'a-0-1', 'a-0-0', 'a-0-2', 'a-1-0', 'a-group-1-0', 'a-2-0', 'a-3-0']) {
+    await next.focus(); await page.keyboard.press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement.id), `thread-${id}`);
+  }
+  assert.equal(await next.isDisabled(), true);
+  await page.screenshot({ path: path.join(artifacts, `grouped-review-${mobile ? 'mobile' : 'desktop'}.png`) });
+});
+
+test('review and group replies, edits, drafts and feedback persist and copy across filters', options, async t => {
+  const page = await pageFor(t);
+  await page.goto(scopesURL); await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  await page.locator('#thread-a-review-0 [data-action="reply"]').click();
+  await page.locator('#comment-text').fill('Check the entire review scope.'); await page.locator('#comment-text').press('Control+Enter');
+  await page.locator('#group-0 [data-action="group-comment"]').click();
+  await page.locator('#comment-text').fill('Group feedback draft.');
+  await reloadReview(page);
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Group feedback draft.');
+  assert.equal(await page.locator('#comment-text').evaluate(el => !!el.closest('#group-discussions-0')), true);
+  await page.locator('#comment-text').press('Control+Enter');
+  await page.locator('#thread-u-2 [data-action="edit-root"]').click();
+  await page.locator('#comment-text').fill('Edited group feedback.'); await page.locator('#comment-text').press('Control+Enter');
+  await page.locator('#review-overview [data-action="review-comment"]').click();
+  await page.locator('#comment-text').fill('A review-wide comment.'); await page.locator('#comment-text').press('Control+Enter');
+  await reloadReview(page);
+  assert.match(await page.locator('#thread-a-review-0').textContent(), /Check the entire review scope/);
+  assert.match(await page.locator('#thread-u-2').textContent(), /Edited group feedback/);
+  assert.match(await page.locator('#thread-u-3').textContent(), /A review-wide comment/);
+  await page.locator('#search').fill('nothing-matches');
+  await page.locator('[data-action="export"]').click();
+  const output = await page.locator('#markdown-output').inputValue();
+  assert.match(output, /Review discussion/); assert.match(output, /Check the entire review scope/);
+  assert.match(output, /Edited group feedback/); assert.match(output, /A review-wide comment/);
+  assert.doesNotMatch(output, /These files work together|Check folded and deleted files/);
+  assert.equal(await page.locator('#thread-u-2').isVisible(), true, 'group feedback remains reachable even when its files are filtered out');
+  page.once('dialog', dialog => dialog.accept()); await page.locator('#thread-u-2 [data-action="delete-root"]').click();
+  await reloadReview(page); assert.equal(await page.locator('#thread-u-2').count(), 0);
+  await page.locator('#thread-a-review-0 [data-action="reply"]').click(); await page.locator('#comment-text').fill('Unsaved review reply.');
+  await reloadReview(page); assert.equal(await page.locator('#comment-text').inputValue(), 'Unsaved review reply.');
+  assert.equal(await page.locator('#comment-text').evaluate(el => !!el.closest('#review-overview')), true);
+});
+
+test('legacy file-only caches restore and new scoped caches reject missing, forged or cross-scope data without overwrite', options, async t => {
+  const page = await pageFor(t);
+  const key = await storageKey(page);
+  const legacy = { version: 1, sequence: 1, editor: null, feedback: Array.from({ length: 4 }, () => ({ viewed: false, threads: [] })) };
+  legacy.feedback[0].threads.push({ id: 'u-1', author: 'You', text: 'Legacy feedback', replies: [] });
+  await page.evaluate(({ key, legacy }) => localStorage.setItem(key, JSON.stringify(legacy)), { key, legacy });
+  await reloadReview(page);
+  assert.match(await page.locator('#thread-u-1').textContent(), /Legacy feedback/);
+  assert.equal(await page.locator('#thread-u-1 .comment-heading strong').textContent(), 'User');
+  assert.equal(await page.locator('#thread-u-1 .avatar').textContent(), 'U');
+  assert.equal(await page.locator('#storage-warning').isVisible(), false);
+  await page.goto(scopesURL); await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  await page.locator('#review-overview [data-action="review-comment"]').click();
+  await page.locator('#comment-text').fill('Scoped feedback'); await page.locator('#comment-text').press('Control+Enter');
+  const scopedKey = await storageKey(page), saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), scopedKey);
+  assert.equal(saved.version, 2);
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  for (const corrupt of [
+    value => { delete value.review; },
+    value => { value.groups.pop(); },
+    value => { value.review[0].text = 'Forged Agent note'; },
+    value => { value.groups[0][0].id = value.review[0].id; },
+    value => { value.review[1].line = 1; },
+    value => { value.editor = { file: 0, group: 0, text: 'Draft', initialText: '' }; },
+    value => { value.editor = { group: 0, text: 'Draft', initialText: '', anchor: { text: '', line: 1 } }; }
+  ]) {
+    const value = structuredClone(saved); corrupt(value); const raw = JSON.stringify(value);
+    await page.evaluate(({ key, raw }) => localStorage.setItem(key, raw), { key: scopedKey, raw });
+    await reloadReview(page);
+    assert.equal(await page.locator('#storage-warning').isVisible(), true);
+    assert.equal(await page.evaluate(key => localStorage.getItem(key), scopedKey), raw);
+    assert.equal(await page.locator('#thread-u-1').count(), 0);
+  }
+  assert.deepEqual(errors, []);
 });
 
 test('responsive rerender preserves the focused draft and its selection', options, async t => {
@@ -571,7 +698,7 @@ const storageKey = page => page.locator('meta[name="revmap-storage-key"]').getAt
 test('feedback, edits, replies, deletions and Viewed survive refresh without requiring a copy', options, async t => {
   const page = await pageFor(t);
   assert.equal(await warnsOnLeave(page), false);
-  await page.locator('#theme').selectOption('light');
+  await page.emulateMedia({ colorScheme: 'light' });
   await page.locator('[data-layout="split"]').click();
   assert.equal(await page.evaluate(() => localStorage.length), 0, 'presentation does not write feedback');
   await page.locator('[data-viewed="1"]').check();
@@ -585,6 +712,7 @@ test('feedback, edits, replies, deletions and Viewed survive refresh without req
   await reloadReview(page);
   assert.equal(await page.locator('[data-viewed="1"]').isChecked(), true);
   assert.match(await page.locator('#thread-u-1').textContent(), /Saved feedback.*A reply/s);
+  assert.deepEqual(await page.locator('#thread-u-1 .comment-heading strong').allTextContents(), ['User', 'User']);
   assert.equal(await warnsOnLeave(page), false);
   await page.locator('#thread-u-1 [data-action="edit-root"]').click();
   await page.locator('#comment-text').fill('Edited feedback');

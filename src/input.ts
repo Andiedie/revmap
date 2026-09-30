@@ -63,15 +63,22 @@ export function parseInput(value: unknown): ReviewInput {
     try { value = JSON.parse(value); }
     catch { invalid('input', 'invalid JSON; use a JSON object with double-quoted keys and no trailing commas.'); }
   }
-  const input = object(value, 'input', ['base', 'files']);
+  const input = object(value, 'input', ['base', 'comments', 'files', 'groups']);
+  if ('files' in input && 'groups' in input) invalid('input', 'use files or groups, not both.');
   const base = 'base' in input ? nonempty(input.base, 'base') : undefined;
   if (base?.includes('\0')) invalid('base', 'must not contain NUL; use a commit reference such as HEAD~1.');
-  if (!Array.isArray(input.files) || !input.files.length) {
-    invalid('files', 'expected a nonempty ordered array; list at least one { "path": "file" }.');
-  }
   const paths = new Set<string>();
-  const files = Array.from(input.files, (value, index): FileInput => {
-    const field = `files[${index}]`;
+  function notes(value: unknown, field: string, anchored = false): Note[] {
+    if (!Array.isArray(value)) invalid(field, 'expected an array; use [] for no comments.');
+    return Array.from(value, (note, i) => anchored ? comment(note, `${field}[${i}]`) : {
+      text: nonempty(object(note, `${field}[${i}]`, ['text']).text, `${field}[${i}].text`)
+    });
+  }
+  function files(value: unknown, field: string): FileInput[] {
+    if (!Array.isArray(value) || !value.length) invalid(field, 'expected a nonempty ordered array; list at least one { "path": "file" }.');
+    return Array.from(value, (value, index) => file(value, `${field}[${index}]`));
+  }
+  function file(value: unknown, field: string): FileInput {
     const entry = object(value, field, ['path', 'oldPath', 'priority', 'comments']);
     const selected = path(entry.path, `${field}.path`);
     if (paths.has(selected)) invalid(`${field}.path`, 'duplicate path; list each file only once.');
@@ -82,11 +89,17 @@ export function parseInput(value: unknown): ReviewInput {
     if (priority !== 'high' && priority !== 'normal' && priority !== 'low') {
       invalid(`${field}.priority`, 'use "high", "normal", or "low".');
     }
-    if ('comments' in entry && !Array.isArray(entry.comments)) {
-      invalid(`${field}.comments`, 'expected an array; use [] for no comments.');
-    }
-    const comments = Array.from((entry.comments as unknown[] | undefined) ?? [], (note, i) => comment(note, `${field}.comments[${i}]`));
+    const comments = 'comments' in entry ? notes(entry.comments, `${field}.comments`, true) : [];
     return { path: selected, ...(oldPath === undefined ? {} : { oldPath }), priority, comments };
-  });
-  return { ...(base === undefined ? {} : { base }), files };
+  }
+  const context = { ...(base === undefined ? {} : { base }), ...('comments' in input ? { comments: notes(input.comments, 'comments') } : {}) };
+  if ('groups' in input) {
+    if (!Array.isArray(input.groups) || !input.groups.length) invalid('groups', 'expected a nonempty ordered array of groups.');
+    const groups = Array.from(input.groups, (value, i) => {
+      const field = `groups[${i}]`, entry = object(value, field, ['title', 'comments', 'files']);
+      return { title: nonempty(entry.title, `${field}.title`), comments: 'comments' in entry ? notes(entry.comments, `${field}.comments`) : [], files: files(entry.files, `${field}.files`) };
+    });
+    return { ...context, groups };
+  }
+  return { ...context, files: files(input.files, 'files') };
 }

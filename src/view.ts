@@ -2,6 +2,7 @@ import { parsePatch } from 'diff';
 import { lines, Note, Review, ReviewFile, Side } from './model';
 
 export interface Reply { id: string; text: string }
+// Keep 'You' as the stored user role for existing feedback caches; display it as 'User'.
 export interface Thread extends Note { id: string; author: 'Agent' | 'You'; replies: Reply[] }
 export interface Feedback { viewed: boolean; threads: Thread[] }
 export interface CodeRow { kind: 'context' | 'add' | 'remove'; text: string; old?: number; new?: number }
@@ -9,11 +10,11 @@ export interface Gap { kind: 'gap'; old: number; new: number; count: number }
 export type Row = CodeRow | Gap;
 export interface Range { side: Side; start: number; end: number }
 
+export function initialThreads(notes: Note[], prefix: string): Thread[] {
+  return notes.map((note, j) => ({ ...note, id: `${prefix}-${j}`, author: 'Agent', replies: [] }));
+}
 export function initialFeedback(review: Review): Feedback[] {
-  return review.files.map((file, i) => ({
-    viewed: false,
-    threads: file.comments.map((note, j) => ({ ...note, id: `a-${i}-${j}`, author: 'Agent', replies: [] }))
-  }));
+  return review.files.map((file, i) => ({ viewed: false, threads: initialThreads(file.comments, `a-${i}`) }));
 }
 
 export function diffRows(file: ReviewFile): Row[] {
@@ -90,18 +91,33 @@ function codeBlock(text: string): string {
 }
 function quote(text: string): string { return text.split('\n').map(line => `> ${line}`).join('\n'); }
 
-export function exportMarkdown(review: Review, feedback: Feedback[]): string {
+export function exportMarkdown(review: Review, feedback: Feedback[], context: { review: Thread[]; groups: Thread[][] } = { review: [], groups: [] }): string {
   const result = [
     '# Review feedback', '',
     `Repository: ${inlineCode(review.repository)}`,
     `Base: ${review.base ? inlineCode(review.base) : 'Empty repository'} → working tree snapshot`,
     `Snapshot: ${review.createdAt}`, '', '## Files', ''
   ];
-  review.files.forEach((file, i) => {
-    const rename = file.oldPath ? `${inlineCode(file.oldPath)} → ` : '';
+  const checklist = (i: number) => {
+    const file = review.files[i], rename = file.oldPath ? `${inlineCode(file.oldPath)} → ` : '';
     result.push(`- [${feedback[i].viewed ? 'x' : ' '}] ${rename}${inlineCode(file.path)}`);
-  });
+  };
+  if (review.groups) review.groups.forEach(group => { result.push(`### ${inlineCode(group.title)}`, ''); group.files.forEach(checklist); result.push(''); });
+  else review.files.forEach((_, i) => checklist(i));
   result.push('', 'Checked = viewed; unchecked = not marked viewed. Neither is an approval.');
+  function discussion(thread: Thread): void {
+    if (thread.author === 'Agent') result.push('Agent context:', quote(thread.text));
+    else result.push('**User:**', '', thread.text);
+    for (const reply of thread.replies) result.push('', '**User — reply:**', '', reply.text);
+  }
+  function contextFeedback(title: string, threads: Thread[]): void {
+    const included = threads.filter(thread => thread.author === 'You' || thread.replies.length);
+    if (!included.length) return;
+    result.push('', `## ${title}`);
+    for (const thread of included) { result.push(''); discussion(thread); }
+  }
+  contextFeedback('Review discussion', context.review);
+  review.groups?.forEach((group, i) => contextFeedback(`Group: ${inlineCode(group.title)}`, context.groups[i] ?? []));
   review.files.forEach((file, i) => {
     const threads = feedback[i].threads.filter(thread => thread.author === 'You' || thread.replies.length);
     if (!threads.length) return;
@@ -116,9 +132,7 @@ export function exportMarkdown(review: Review, feedback: Feedback[]): string {
         if (end - thread.line >= 20) result.push(`_Excerpt shortened; full range: ${location(thread)}._`);
         result.push('');
       }
-      if (thread.author === 'Agent') result.push('Agent context:', quote(thread.text));
-      else result.push(thread.text);
-      for (const reply of thread.replies) result.push('', '**You — reply:**', '', reply.text);
+      discussion(thread);
     }
   });
   return result.join('\n').trim() + '\n';

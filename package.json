@@ -1,6 +1,6 @@
 {
   "name": "revmap",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A local, agent-guided review map. Review changes in one self-contained HTML page.",
   "license": "MIT",
   "repository": {

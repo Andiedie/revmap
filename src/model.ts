@@ -13,7 +13,8 @@ export interface FileInput {
   priority?: Priority;
   comments?: Note[];
 }
-export interface ReviewInput { base?: string; files: FileInput[] }
+export interface GroupInput { title: string; comments?: Note[]; files: FileInput[] }
+export interface ReviewInput { base?: string; comments?: Note[]; files?: FileInput[]; groups?: GroupInput[] }
 export interface Version {
   text: string | null;
   mode: string;
@@ -30,7 +31,10 @@ export interface ReviewFile {
   after: Version | null;
   patch: string;
 }
+export interface ReviewGroup { title: string; comments: Note[]; files: number[] }
 export interface Review {
+  comments?: Note[];
+  groups?: ReviewGroup[];
   repository: string;
   base: string | null;
   createdAt: string;

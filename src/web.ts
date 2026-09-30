@@ -1,6 +1,6 @@
 import MarkdownIt from 'markdown-it';
 import { lines, Note, Review, Side } from './model';
-import { CodeRow, diffRows, exportMarkdown, Feedback, initialFeedback, location, Range, revealRows, Row, Thread } from './view';
+import { CodeRow, diffRows, exportMarkdown, Feedback, initialFeedback, initialThreads, location, Range, revealRows, Row, Thread } from './view';
 
 const review: Review = JSON.parse(document.getElementById('review-data')!.textContent!);
 const suffixCounts = new Map<string, number>();
@@ -24,15 +24,17 @@ const markdown = (text: string) => md.render(text).replace(/<a /g, '<a target="_
 const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14M7 8h7a3 3 0 0 1 3 3v8"/><circle cx="7" cy="5" r="2"/><circle cx="7" cy="19" r="2"/><circle cx="17" cy="19" r="2"/></svg>';
 interface FileState extends Feedback { open: boolean; loaded: boolean; budget: number; ranges: Range[]; rows?: Row[] }
 const states: FileState[] = initialFeedback(review).map((feedback, i) => ({ ...feedback, open: review.files[i].priority !== 'low', loaded: false, budget: 600, ranges: [] }));
-interface Editor { file: number; text: string; initialText?: string; originLine?: number; anchor?: Note; thread?: string; reply?: string; editRoot?: boolean; preview?: boolean; error?: string; invalid?: 'text'; selectingEnd?: boolean }
-interface SavedFeedback { version: 1; feedback: Feedback[]; editor: Pick<Editor, 'file' | 'text' | 'initialText' | 'originLine' | 'anchor' | 'thread' | 'reply' | 'editRoot'> | null; sequence: number }
+interface Scope { file?: number; group?: number }
+const reviewState = { threads: initialThreads(review.comments ?? [], 'a-review') };
+const groupStates = (review.groups ?? []).map((group, i) => ({ threads: initialThreads(group.comments, `a-group-${i}`), open: true }));
+const fileGroups = new Map(review.groups?.flatMap((group, i) => group.files.map(file => [file, i] as const)));
+interface Editor extends Scope { text: string; initialText?: string; originLine?: number; anchor?: Note; thread?: string; reply?: string; editRoot?: boolean; preview?: boolean; error?: string; invalid?: 'text'; selectingEnd?: boolean }
+interface SavedFeedback { version: 1 | 2; feedback: Feedback[]; review?: Thread[]; groups?: Thread[][]; editor: Pick<Editor, 'file' | 'group' | 'text' | 'initialText' | 'originLine' | 'anchor' | 'thread' | 'reply' | 'editRoot'> | null; sequence: number }
 interface Drag { pointer: number; target: HTMLElement; file: number; side: Side; first: number; last: number; x: number; y: number; moved: boolean }
 let drag: Drag | null = null, dragFrame = 0, ignorePointerClick = false;
 let editor: Editor | null = null, sequence = 0, copyAttempt = 0, copyReset = 0, toolbarFrame = 0, layout = 'unified', filter = '', query = '', navOpen = false;
-let navigationJump: { file: number; thread?: string; y: number } | null = null;
+let navigationJump: (Scope & { thread?: string; y: number }) | null = null;
 const mobile = matchMedia('(max-width: 760px)');
-const dark = matchMedia('(prefers-color-scheme: dark)');
-let theme = 'system';
 const app = document.getElementById('app')!;
 const storageKey = document.querySelector<HTMLMetaElement>('meta[name="revmap-storage-key"]')!.content;
 let savedFeedback = feedbackString(), restoreFailed = false;
@@ -46,16 +48,22 @@ function stats(i: number): { added: number; removed: number } {
   return { added: rows.filter(row => row.kind === 'add').length, removed: rows.filter(row => row.kind === 'remove').length };
 }
 function isLarge(i: number): boolean { const s = stats(i); return s.added + s.removed > 2000; }
-function humanCount(i: number): number { return states[i].threads.reduce((n, t) => n + (t.author === 'You' ? 1 : 0) + t.replies.length, 0); }
+function scopeState(scope: Scope): { threads: Thread[] } { return scope.file !== undefined ? states[scope.file] : scope.group !== undefined ? groupStates[scope.group] : reviewState; }
+function scopeAttributes(scope: Scope): string { return scope.file !== undefined ? attr(scope.file) : scope.group !== undefined ? `data-group="${scope.group}"` : ''; }
+function scopeElement(scope: Scope): HTMLElement { return document.getElementById(scope.file !== undefined ? `file-${scope.file}` : scope.group !== undefined ? `group-discussions-${scope.group}` : 'review-discussions')!; }
+function sameScope(a: Scope | null, b: Scope): boolean { return !!a && a.file === b.file && a.group === b.group; }
+function scopeFromElement(el: HTMLElement): Scope { return el.dataset.file !== undefined ? { file: Number(el.dataset.file) } : el.dataset.group !== undefined ? { group: Number(el.dataset.group) } : {}; }
+function humanCount(i: number): number { return threadCount(states[i].threads); }
+function threadCount(threads: Thread[]): number { return threads.reduce((n, t) => n + (t.author === 'You' ? 1 : 0) + t.replies.length, 0); }
+function groupVisible(i: number): boolean { return review.groups![i].files.some(visible) || threadCount(groupStates[i].threads) > 0 || (sameScope(editor, { group: i }) && hasDraft()); }
+function fileCard(i: number): string { return `<section class="file-card" id="file-${i}" aria-label="${escape(review.files[i].path)}" data-index="${i}"></section>`; }
 function visible(i: number): boolean {
   return `${review.files[i].path} ${review.files[i].oldPath || ''}`.toLowerCase().includes(query) && (!filter || (filter === 'unviewed' ? !states[i].viewed : humanCount(i) > 0));
 }
 
 app.innerHTML = `
   <a class="skip-link" href="#content">Skip to review files</a>
-  <header class="topbar"><a class="brand" href="#">${icon}<span>revmap</span></a><span class="repo-name">${escape(review.repository)}</span><span class="local-badge">Local snapshot</span>
-    <label class="theme-control"><span class="sr-only">Theme</span><select id="theme"><option value="system">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-  </header>
+  <header class="topbar"><a class="brand" href="#">${icon}<span>revmap</span></a><span class="repo-name">${escape(review.repository)}</span></header>
   <nav id="review-toolbar" aria-label="Review navigation and actions"><div class="toolbar-inner"><div class="toolbar-navigation">
     ${(['file', 'comment'] as const).map(kind => `<div class="step-group" role="group" aria-label="${kind === 'file' ? 'File' : 'Comment'} navigation">${button(`previous-${kind}`, '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>', `aria-label="Previous ${kind}"`, 'step-button')}<span class="step-caption">${kind === 'file' ? 'File' : 'Comments'}<span id="${kind}-position"></span></span>${button(`next-${kind}`, '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg>', `aria-label="Next ${kind}"`, 'step-button')}</div>`).join('')}
     </div><div class="toolbar-actions">${button('nav', 'Files', 'aria-expanded="false" aria-controls="sidebar" popovertarget="sidebar"', 'mobile-nav')}<div class="layout-controls" role="group" aria-label="Diff layout">${button('layout', 'Unified', 'data-layout="unified" aria-pressed="true"')}${button('layout', 'Split', 'data-layout="split" aria-pressed="false"')}</div>${button('export', 'Copy feedback', '', 'primary copy-review')}</div></div></nav>
@@ -65,7 +73,8 @@ app.innerHTML = `
     <label class="search"><span class="sr-only">Filter files</span><input id="search" type="search" placeholder="Filter files…" autocomplete="off"></label>
     <div class="filters" role="group" aria-label="File filters">${button('filter', 'All', 'data-filter="" aria-pressed="true"')}${button('filter', 'Unviewed', 'data-filter="unviewed" aria-pressed="false"')}${button('filter', 'Discussed', 'data-filter="discussed" aria-pressed="false"')}</div><nav id="file-nav" aria-label="Files in review order"></nav>
   </aside><main id="content" tabindex="-1">
-    <div id="files">${review.files.map((_, i) => `<section class="file-card" id="file-${i}" aria-label="${escape(review.files[i].path)}" data-index="${i}"></section>`).join('')}</div>
+    <section id="review-overview" class="context-block" aria-labelledby="overview-title"><div class="context-heading"><h2 id="overview-title">Review overview</h2><span class="draft-badge" data-draft-review hidden>Draft</span>${button('review-comment', '+ Review comment')}</div><div id="review-discussions" class="scope-discussions"></div></section>
+    <div id="files">${review.groups ? review.groups.map((group, i) => `<section class="review-group" id="group-${i}" aria-labelledby="group-title-${i}"><div class="group-heading">${button('toggle-group', `<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span id="group-title-${i}">${escape(group.title)}</span><span class="count">${group.files.length}</span>`, `data-group="${i}" aria-expanded="true" aria-controls="group-files-${i}"`, 'group-toggle')}<span class="group-draft" data-draft-group="${i}" hidden>Draft</span>${button('group-comment', '+ Group comment', `data-group="${i}"`)}</div><div id="group-discussions-${i}" class="scope-discussions"></div><div id="group-files-${i}">${group.files.map(fileCard).join('')}</div></section>`).join('') : review.files.map((_, i) => fileCard(i)).join('')}</div>
     <div id="empty" class="empty" hidden><h2>No matching files</h2>${button('clear-filter', 'Clear filters')}</div>
   </main></div>
   <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
@@ -76,12 +85,12 @@ function anchorData({ text, line, endLine, side }: Note): Note { return { text, 
 function feedbackSnapshot(): SavedFeedback {
   let draft: SavedFeedback['editor'] = null;
   if (editor && hasDraft() && editor.text !== editor.initialText) {
-    const { file, text, initialText, originLine, anchor, thread, reply, editRoot } = editor;
-    draft = { file, text, initialText, originLine, anchor, thread, reply, editRoot };
+    const { file, group, text, initialText, originLine, anchor, thread, reply, editRoot } = editor;
+    draft = { file, group, text, initialText, originLine, anchor, thread, reply, editRoot };
   }
-  return { version: 1, feedback: states.map(({ viewed, threads }) => ({ viewed, threads })), editor: draft, sequence };
+  return { version: 2, feedback: states.map(({ viewed, threads }) => ({ viewed, threads })), review: reviewState.threads, groups: groupStates.map(state => state.threads), editor: draft, sequence };
 }
-function feedbackString(data = feedbackSnapshot()): string { return JSON.stringify({ feedback: data.feedback, editor: data.editor }); }
+function feedbackString(data = feedbackSnapshot()): string { return JSON.stringify({ feedback: data.feedback, review: data.review, groups: data.groups, editor: data.editor }); }
 function storageWarning(message: string): void {
   const warning = document.getElementById('storage-warning')!;
   warning.hidden = !message;
@@ -108,49 +117,58 @@ function restoreFeedback(): void {
     const raw = localStorage.getItem(storageKey);
     if (raw === null) return;
     const saved = JSON.parse(raw) as SavedFeedback;
-    if (!saved || saved.version !== 1 || !Number.isSafeInteger(saved.sequence) || saved.sequence < 0 || saved.sequence >= Number.MAX_SAFE_INTEGER || !Array.isArray(saved.feedback) || saved.feedback.length !== states.length) throw new Error('Invalid feedback');
+    if (!saved || (saved.version !== 1 && saved.version !== 2) || (saved.version === 1 && (review.comments !== undefined || review.groups !== undefined)) || !Number.isSafeInteger(saved.sequence) || saved.sequence < 0 || saved.sequence >= Number.MAX_SAFE_INTEGER || !Array.isArray(saved.feedback) || saved.feedback.length !== states.length) throw new Error('Invalid feedback');
     const ids = new Set<string>();
     const userId = (id: string) => typeof id === 'string' && /^u-[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id.slice(2))) && Number(id.slice(2)) <= saved.sequence;
     const uniqueId = (id: string) => !ids.has(id) && !!ids.add(id);
-    const validAnchor = (note: Note, i: number): boolean => {
+    const validScope = (scope: Scope): boolean => scope.file !== undefined
+      ? scope.group === undefined && Number.isInteger(scope.file) && scope.file >= 0 && scope.file < states.length
+      : scope.group === undefined || (Number.isInteger(scope.group) && scope.group >= 0 && scope.group < groupStates.length);
+    const validAnchor = (note: Note, scope: Scope): boolean => {
       if (!note || typeof note.text !== 'string' || (note.side !== undefined && note.side !== 'old' && note.side !== 'new')) return false;
+      if (scope.file === undefined) return note.line === undefined && note.endLine === undefined && note.side === undefined;
       if (note.line === undefined) return note.endLine === undefined;
       if (note.endLine !== undefined && !Number.isSafeInteger(note.endLine)) return false;
-      const end = note.endLine ?? note.line, max = lines((note.side === 'old' ? review.files[i].before : review.files[i].after)?.text).length;
+      const end = note.endLine ?? note.line, max = lines((note.side === 'old' ? review.files[scope.file].before : review.files[scope.file].after)?.text).length;
       return Number.isSafeInteger(note.line) && note.line > 0 && Number.isSafeInteger(end) && end >= note.line && end <= max;
     };
-    if (!saved.feedback.every((feedback, i) => {
-      if (!feedback || typeof feedback.viewed !== 'boolean' || !Array.isArray(feedback.threads)) return false;
-      const originals = states[i].threads;
-      return feedback.threads.every(thread => {
-        if (!thread || !validAnchor(thread, i) || !Array.isArray(thread.replies)) return false;
-        if (thread.author === 'Agent') {
-          const original = originals.find(note => note.id === thread.id);
-          if (!original || thread.text !== original.text || thread.line !== original.line || thread.endLine !== original.endLine || thread.side !== original.side) return false;
-        } else if (thread.author !== 'You' || !userId(thread.id) || !thread.text.trim()) return false;
-        return uniqueId(thread.id) && thread.replies.every(reply => reply && userId(reply.id) && uniqueId(reply.id) && typeof reply.text === 'string' && !!reply.text.trim());
-      }) && originals.every(note => feedback.threads.some(thread => thread.id === note.id && thread.author === 'Agent'));
-    })) throw new Error('Invalid threads');
+    const validThreads = (threads: Thread[], originals: Thread[], scope: Scope): boolean => Array.isArray(threads) && threads.every(thread => {
+      if (!thread || !validAnchor(thread, scope) || !Array.isArray(thread.replies)) return false;
+      if (thread.author === 'Agent') {
+        const original = originals.find(note => note.id === thread.id);
+        if (!original || thread.text !== original.text || thread.line !== original.line || thread.endLine !== original.endLine || thread.side !== original.side) return false;
+      } else if (thread.author !== 'You' || !userId(thread.id) || !thread.text.trim()) return false;
+      return uniqueId(thread.id) && thread.replies.every(reply => reply && userId(reply.id) && uniqueId(reply.id) && typeof reply.text === 'string' && !!reply.text.trim());
+    }) && originals.every(note => threads.some(thread => thread.id === note.id && thread.author === 'Agent'));
+    const reviewThreads = saved.version === 1 ? [] : saved.review!;
+    const groups = saved.version === 1 ? [] : saved.groups!;
+    if (!saved.feedback.every((feedback, i) => feedback && typeof feedback.viewed === 'boolean' && validThreads(feedback.threads, states[i].threads, { file: i })) ||
+      !validThreads(reviewThreads, reviewState.threads, {}) || !Array.isArray(groups) || groups.length !== groupStates.length ||
+      !groups.every((threads, i) => validThreads(threads, groupStates[i].threads, { group: i }))) throw new Error('Invalid threads');
+    const savedThreads = (scope: Scope) => scope.file !== undefined ? saved.feedback[scope.file].threads : scope.group !== undefined ? groups[scope.group] : reviewThreads;
     const draft = saved.editor;
     if (draft !== null) {
-      if (!draft || !Number.isInteger(draft.file) || draft.file < 0 || draft.file >= states.length || typeof draft.text !== 'string' || typeof draft.initialText !== 'string' || (draft.editRoot !== undefined && typeof draft.editRoot !== 'boolean')) throw new Error('Invalid draft');
+      if (!draft || !validScope(draft) || (saved.version === 1 && draft.file === undefined) || typeof draft.text !== 'string' || typeof draft.initialText !== 'string' || (draft.editRoot !== undefined && typeof draft.editRoot !== 'boolean')) throw new Error('Invalid draft');
       if (draft.thread !== undefined) {
-        const thread = saved.feedback[draft.file].threads.find(thread => thread.id === draft.thread);
+        const thread = savedThreads(draft).find(thread => thread.id === draft.thread);
         const reply = thread?.replies.find(reply => reply.id === draft.reply);
         if (!thread || draft.anchor !== undefined || draft.originLine !== undefined || (draft.editRoot && (thread.author !== 'You' || draft.reply !== undefined)) || (draft.reply !== undefined && !reply) || draft.initialText !== (draft.editRoot ? thread.text : reply ? reply.text : '')) throw new Error('Invalid draft target');
-      } else if (draft.editRoot || draft.reply !== undefined || draft.initialText !== '' || (draft.anchor !== undefined && !validAnchor(draft.anchor, draft.file))) throw new Error('Invalid draft anchor');
+      } else if (draft.editRoot || draft.reply !== undefined || draft.initialText !== '' || (draft.anchor !== undefined && !validAnchor(draft.anchor, draft))) throw new Error('Invalid draft anchor');
       if (draft.originLine !== undefined && (!Number.isSafeInteger(draft.originLine) || draft.anchor?.line === undefined || draft.originLine < draft.anchor.line || draft.originLine > (draft.anchor.endLine ?? draft.anchor.line))) throw new Error('Invalid draft origin');
     }
+    const copyThreads = (threads: Thread[]) => threads.map(thread => ({ ...anchorData(thread), id: thread.id, author: thread.author, replies: thread.replies.map(({ id, text }) => ({ id, text })) }));
     saved.feedback.forEach((feedback, i) => {
       states[i].viewed = feedback.viewed;
       states[i].open = !feedback.viewed && review.files[i].priority !== 'low';
-      states[i].threads = feedback.threads.map(thread => ({ ...anchorData(thread), id: thread.id, author: thread.author, replies: thread.replies.map(({ id, text }) => ({ id, text })) }));
+      states[i].threads = copyThreads(feedback.threads);
     });
+    reviewState.threads = copyThreads(reviewThreads);
+    groupStates.forEach((state, i) => state.threads = copyThreads(groups[i]));
     sequence = saved.sequence;
     if (draft) {
-      const { file, text, initialText, originLine, thread, reply, editRoot } = draft;
-      editor = { file, text, initialText, originLine, thread, reply, editRoot, anchor: draft.anchor && anchorData(draft.anchor) };
-      states[file].open = true; states[file].loaded = true;
+      const { file, group, text, initialText, originLine, thread, reply, editRoot } = draft;
+      editor = { file, group, text, initialText, originLine, thread, reply, editRoot, anchor: draft.anchor && anchorData(draft.anchor) };
+      if (file !== undefined) { states[file].open = true; states[file].loaded = true; }
     }
     savedFeedback = feedbackString();
   } catch {
@@ -164,7 +182,15 @@ function updateNavigation(): void {
   const viewed = states.filter(s => s.viewed).length;
   document.getElementById('progress-text')!.textContent = `${viewed} / ${states.length} viewed`;
   (document.getElementById('progress') as HTMLProgressElement).value = viewed;
-  document.getElementById('file-nav')!.innerHTML = review.files.map((file, i) => !visible(i) ? '' : `<a href="#file-${i}" data-action="navigate" data-file="${i}" title="${escape(file.path)}" class="nav-file ${states[i].viewed ? 'is-viewed' : ''}"><span class="nav-order">${states[i].viewed ? '✓' : i + 1}</span><span class="nav-path"><span class="nav-name">${escape(fileLabels[i].name)}</span>${fileLabels[i].directory ? `<span class="nav-directory">${escape(fileLabels[i].directory)}</span>` : ''}</span>${draftBadge(i)}<span class="priority-dot ${file.priority}" title="${file.priority} priority"><span class="sr-only">${file.priority} priority</span></span>${humanCount(i) ? `<span class="nav-count" aria-label="${humanCount(i)} feedback comments">${humanCount(i)}</span>` : ''}</a>`).join('');
+  const fileLink = (i: number) => {
+    const file = review.files[i];
+    return !visible(i) ? '' : `<a href="#file-${i}" data-action="navigate" data-file="${i}" title="${escape(file.path)}" class="nav-file ${states[i].viewed ? 'is-viewed' : ''}"><span class="nav-order">${states[i].viewed ? '✓' : i + 1}</span><span class="nav-path"><span class="nav-name">${escape(fileLabels[i].name)}</span>${fileLabels[i].directory ? `<span class="nav-directory">${escape(fileLabels[i].directory)}</span>` : ''}</span>${draftBadge(i)}<span class="priority-dot ${file.priority}" title="${file.priority} priority"><span class="sr-only">${file.priority} priority</span></span>${humanCount(i) ? `<span class="nav-count" aria-label="${humanCount(i)} feedback comments">${humanCount(i)}</span>` : ''}</a>`;
+  };
+  document.getElementById('file-nav')!.innerHTML = `<a href="#review-overview" data-action="navigate-review" class="nav-overview">Review overview <span class="draft-badge" data-draft-review hidden>Draft</span></a>` + (review.groups ? review.groups.map((group, i) => !groupVisible(i) ? '' : `<div class="nav-group-section"><a href="#group-${i}" data-action="navigate-group" data-group="${i}" class="nav-group">${escape(group.title)}</a>${group.files.map(fileLink).join('')}</div>`).join('') : review.files.map((_, i) => fileLink(i)).join(''));
+  groupStates.forEach((_, i) => {
+    document.getElementById(`group-${i}`)!.hidden = !groupVisible(i);
+  });
+  updateDraftBadges();
   let count = 0;
   states.forEach((_, i) => { const shown = visible(i); document.getElementById(`file-${i}`)!.hidden = !shown; if (shown) count++; });
   document.getElementById('empty')!.hidden = count !== 0;
@@ -177,34 +203,49 @@ function updateNavigation(): void {
   }
   updateToolbar();
 }
-function toolbarItems(): { files: number[]; comments: { file: number; id: string; element: HTMLElement | null }[] } {
+function updateDraftBadges(): void {
+  document.querySelectorAll<HTMLElement>('[data-draft-file]').forEach(badge => badge.hidden = editor?.file !== Number(badge.dataset.draftFile) || !hasDraft());
+  document.querySelectorAll<HTMLElement>('[data-draft-group]').forEach(badge => badge.hidden = !editor || !hasDraft() || (editor.file !== undefined ? fileGroups.get(editor.file) !== Number(badge.dataset.draftGroup) : editor.group !== Number(badge.dataset.draftGroup)));
+  document.querySelectorAll<HTMLElement>('[data-draft-review]').forEach(badge => badge.hidden = !sameScope(editor, {}) || !hasDraft());
+}
+function toolbarItems(): { files: number[]; comments: (Scope & { id: string; element: HTMLElement | null })[] } {
   // ponytail: linear target scan per frame; cache geometry if large reviews make scrolling slow.
   const files = states.flatMap((_, i) => visible(i) ? [i] : []);
-  const comments = files.flatMap(file => {
-    const rendered = Array.from(document.querySelectorAll<HTMLElement>(`#file-${file} .thread`));
+  const targets = (scope: Scope) => {
+    const rendered = Array.from(scopeElement(scope).querySelectorAll<HTMLElement>('.thread'));
     const ids = rendered.map(el => el.id.slice('thread-'.length)), present = new Set(ids);
-    const missing = states[file].threads.filter(thread => !present.has(thread.id));
-    return [...ids, ...missing.map(thread => thread.id)].map(id => ({ file, id, element: document.getElementById(`thread-${id}`) }));
+    const missing = scopeState(scope).threads.filter(thread => !present.has(thread.id));
+    return [...ids, ...missing.map(thread => thread.id)].map(id => ({ ...scope, id, element: document.getElementById(`thread-${id}`) }));
+  };
+  const comments = targets({});
+  if (review.groups) review.groups.forEach((group, i) => {
+    if (groupVisible(i)) { comments.push(...targets({ group: i })); group.files.filter(visible).forEach(file => comments.push(...targets({ file }))); }
   });
+  else files.forEach(file => comments.push(...targets({ file })));
   return { files, comments };
 }
 function updateToolbar(): void {
   const { files, comments } = toolbarItems();
   const top = document.getElementById('review-toolbar')!.getBoundingClientRect().bottom;
   if (navOpen) document.getElementById('sidebar')!.style.setProperty('--navigation-top', `${top + 8}px`);
-  if (navigationJump && (navigationJump.y !== scrollY || !files.includes(navigationJump.file) || (navigationJump.thread && !comments.some(comment => comment.id === navigationJump!.thread)))) navigationJump = null;
+  if (navigationJump && (navigationJump.y !== scrollY || (navigationJump.file !== undefined && !files.includes(navigationJump.file)) || (navigationJump.group !== undefined && !groupVisible(navigationJump.group)) || (navigationJump.thread && !comments.some(comment => comment.id === navigationJump!.thread)))) navigationJump = null;
   let currentFile = files.length ? 0 : -1;
-  files.forEach((file, index) => { if (document.getElementById(`file-${file}`)!.getBoundingClientRect().top <= top + 1) currentFile = index; });
-  if (navigationJump) currentFile = files.indexOf(navigationJump.file);
-  const file = files[currentFile];
-  const headerHeight = document.querySelector(`#file-${file} .file-header`)?.getBoundingClientRect().height || 0;
+  files.forEach((file, index) => {
+    const group = fileGroups.get(file);
+    if (group !== undefined && !groupStates[group].open && review.groups![group].files.find(visible) !== file) return;
+    const card = document.getElementById(group !== undefined && !groupStates[group].open ? `group-${group}` : `file-${file}`)!;
+    if (card.getBoundingClientRect().top <= top + 1) currentFile = index;
+  });
+  if (navigationJump?.file !== undefined) currentFile = files.indexOf(navigationJump.file);
+  const file = files[currentFile], card = document.getElementById(`file-${file}`);
+  const headerHeight = card && card.getClientRects().length && card.getBoundingClientRect().top <= top + 1 ? card.querySelector('.file-header')!.getBoundingClientRect().height : 0;
   const readingTop = top + headerHeight + 12;
   let currentComment = -1;
   comments.forEach((comment, index) => {
-    if (comment.file < file || (comment.file === file && comment.element && comment.element.getBoundingClientRect().top <= readingTop + 1)) currentComment = index;
+    const threshold = comment.file === file ? readingTop : top + 12;
+    if ((comment.file !== undefined && comment.file < file) || (comment.element?.getClientRects().length && comment.element.getBoundingClientRect().top <= threshold + 1)) currentComment = index;
   });
   if (navigationJump?.thread) currentComment = comments.findIndex(comment => comment.id === navigationJump!.thread);
-  else if (navigationJump) currentComment = comments.filter(comment => comment.file < file).length - 1;
   const current = comments[currentComment];
   const insideComment = !!current && (!!navigationJump?.thread || (!!current.element && current.element.getBoundingClientRect().bottom > readingTop && current.element.getBoundingClientRect().top <= readingTop + 1));
   document.getElementById('file-position')!.textContent = `${currentFile + 1} / ${files.length}`;
@@ -217,7 +258,9 @@ function updateToolbar(): void {
   for (const [action, index] of [['previous-comment', currentComment - (insideComment ? 1 : 0)], ['next-comment', currentComment + 1]] as const) {
     const control = document.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!;
     control.disabled = index < 0 || index >= comments.length;
-    control.dataset.file = String(comments[index]?.file);
+    delete control.dataset.file; delete control.dataset.group;
+    if (comments[index]?.file !== undefined) control.dataset.file = String(comments[index].file);
+    if (comments[index]?.group !== undefined) control.dataset.group = String(comments[index].group);
     control.dataset.thread = comments[index]?.id || '';
     control.dataset.anchor = current?.id || '';
   }
@@ -239,6 +282,8 @@ function revealTarget(target: HTMLElement): void {
   scrollPage(scrollY + target.getBoundingClientRect().top - offset);
 }
 function navigateFile(i: number, comment?: { id: string; direction: number; anchor: string }): void {
+  const group = fileGroups.get(i);
+  if (group !== undefined) setGroupOpen(group, true);
   const missing = comment && !document.getElementById(`thread-${comment.id}`);
   const load = !!comment || !isLarge(i), changed = !states[i].open || (load && !states[i].loaded);
   states[i].open = true;
@@ -260,13 +305,23 @@ function navigateFile(i: number, comment?: { id: string; direction: number; anch
   navigationJump = { file: i, thread: comment ? target.id.slice('thread-'.length) : undefined, y: scrollY };
   updateToolbar();
 }
-function threadHTML(i: number, thread: Thread): string {
-  const controls = `data-file="${i}" data-thread="${thread.id}"`;
-  const content = (author: string, text: string, tools: string) => `<div class="comment-heading"><span class="avatar ${author === 'Agent' ? 'agent' : ''}" aria-hidden="true">${author === 'Agent' ? 'A' : 'Y'}</span><strong>${author}</strong>${tools}</div><div class="markdown-body">${markdown(text)}</div>`;
-  let html = `<article class="thread" id="thread-${thread.id}" tabindex="-1"><div class="thread-anchor">${thread.line === undefined ? 'File discussion' : escape(location(thread))}</div>`;
+function navigateContext(scope: Scope, thread?: string): void {
+  setNav(false);
+  const target = thread ? document.getElementById(`thread-${thread}`)! : document.getElementById(scope.group !== undefined ? `group-${scope.group}` : 'review-overview')!;
+  if (thread) { target.classList.add('navigation-target'); setTimeout(() => target.classList.remove('navigation-target'), 1500); }
+  target.tabIndex = -1;
+  revealTarget(target); target.focus({ preventScroll: true });
+  navigationJump = { ...scope, thread, y: scrollY }; updateToolbar();
+}
+function threadHTML(scope: Scope | number, thread: Thread): string {
+  const target = typeof scope === 'number' ? { file: scope } : scope;
+  const controls = `${scopeAttributes(target)} data-thread="${thread.id}"`;
+  const content = (author: string, text: string, tools: string) => `<div class="comment-heading"><span class="avatar ${author === 'Agent' ? 'agent' : ''}" aria-hidden="true">${author === 'Agent' ? 'A' : 'U'}</span><strong>${author === 'Agent' ? 'Agent' : 'User'}</strong>${tools}</div><div class="markdown-body">${markdown(text)}</div>`;
+  const label = target.file !== undefined ? 'File discussion' : target.group !== undefined ? 'Group discussion' : 'Review discussion';
+  let html = `<article class="thread ${thread.line === undefined ? 'context-thread' : ''}" id="thread-${thread.id}" tabindex="-1" aria-label="${thread.line === undefined ? label : escape(location(thread))}">${target.file !== undefined ? `<div class="thread-anchor">${thread.line === undefined ? label : escape(location(thread))}</div>` : ''}`;
   html += content(thread.author, thread.text, thread.author === 'You' ? `<div class="comment-tools">${button('edit-root', 'Edit', controls)}${button('delete-root', 'Delete', controls)}</div>` : '<span class="agent-label">note</span>');
   for (const reply of thread.replies) html += `<div class="reply">${content('You', reply.text, `<div class="comment-tools">${button('edit-reply', 'Edit', `${controls} data-reply="${reply.id}"`)}${button('delete-reply', 'Delete', `${controls} data-reply="${reply.id}"`)}</div>`)}</div>`;
-  html += editor?.file === i && editor.thread === thread.id ? composerHTML() : `<div class="reply-action">${button('reply', 'Reply…', controls)}</div>`;
+  html += sameScope(editor, target) && editor!.thread === thread.id ? composerHTML() : `<div class="reply-action">${button('reply', 'Reply…', controls)}</div>`;
   return html + '</article>';
 }
 function composerHTML(): string {
@@ -367,25 +422,14 @@ function diffHTML(i: number): string {
   return html;
 }
 
-function renderFile(i: number): void {
-  if (drag?.file === i) finishDrag(false);
+function replaceContent(card: HTMLElement, html: string, fallback?: HTMLElement | null): void {
   const scrollTop = scrollY;
-  const file = review.files[i], state = states[i], changes = stats(i);
-  const commentCount = state.threads.length + state.threads.reduce((n, t) => n + t.replies.length, 0);
-  const card = document.getElementById(`file-${i}`)!;
   const focused = card.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
   const focusData = focused ? Object.entries(focused.dataset) : [];
   const selection = focused instanceof HTMLTextAreaElement ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] as const : null;
   const editorScroll = focused?.scrollTop || 0;
   const scrollLeft = card.querySelector('.diff-scroll')?.scrollLeft || 0;
-  card.classList.toggle('viewed', state.viewed);
-  const title = `<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="file-title">${file.oldPath ? `<span class="old-path">${escape(file.oldPath)} → </span>` : ''}<strong>${escape(file.path)}</strong><span class="file-status">${escape(file.status)}</span></span>`;
-  card.innerHTML = `<div class="file-header">${button('toggle-file', title, `${attr(i)} aria-expanded="${state.open}" aria-controls="file-body-${i}" aria-label="${state.open ? 'Collapse' : 'Expand'} ${escape(file.path)} (${escape(file.status)})"`, 'file-toggle')}
-    <span class="priority ${file.priority}">${file.priority === 'high' ? 'Focus' : file.priority === 'low' ? 'Can skim' : 'Normal'}</span>${draftBadge(i)}${file.kind !== 'binary' && file.kind !== 'submodule' ? `<span class="diff-stats"><span class="add-text">+${changes.added}</span> <span class="remove-text">−${changes.removed}</span></span>` : ''}${commentCount ? `<span class="comment-count" title="${commentCount} comments">${commentCount} comments</span>` : ''}
-    <label class="viewed-control"><input type="checkbox" data-viewed="${i}" ${state.viewed ? 'checked' : ''}>Viewed</label></div>
-    <div id="file-body-${i}" class="file-body" ${state.open ? '' : 'hidden'}>${state.open ? `<div class="file-actions"><span>${file.kind === 'symlink' ? 'Symbolic link · target only' : file.kind === 'text' ? file.status === 'unchanged' ? 'No changes' : 'Changes' : file.kind === 'binary' ? `Binary file · ${file.before?.bytes || 0} → ${file.after?.bytes || 0} bytes` : 'Submodule'}${file.before && file.after && file.before.mode !== file.after.mode ? ` · mode ${escape(file.before.mode)} → ${escape(file.after.mode)}` : ''}</span>${button('file-comment', '+ File comment', attr(i))}</div>
-      <div class="file-discussions">${state.threads.filter(t => t.line === undefined).map(t => threadHTML(i, t)).join('')}${editor?.file === i && !editor.thread && editor.anchor?.line === undefined ? composerHTML() : ''}</div>
-      ${state.loaded ? diffHTML(i) : `<div class="load-file">${isLarge(i) ? `<p>Large diff · ${changes.added + changes.removed} changed lines</p>` : '<p>Ready to review</p>'}${button('load-file', 'Load diff', attr(i))}</div>`}` : ''}</div>`;
+  card.innerHTML = html;
   const diff = card.querySelector('.diff-scroll');
   if (diff) diff.scrollLeft = scrollLeft;
   if (focused) {
@@ -393,7 +437,7 @@ function renderFile(i: number): void {
       : focused.getAttribute('name') ? card.querySelector<HTMLElement>(`[name="${focused.getAttribute('name')}"]`)
       : focused.matches('.diff-scroll') ? card.querySelector<HTMLElement>('.diff-scroll')
       : focusData.length ? Array.from(card.querySelectorAll<HTMLElement>('button,input')).find(el => focusData.every(([key, value]) => el.dataset[key] === value) && el.classList.contains('line-plus') === focused.classList.contains('line-plus')) : null;
-    (replacement || card.querySelector<HTMLElement>('.file-toggle'))?.focus({ preventScroll: true });
+    (replacement || card.querySelector<HTMLElement>('.file-toggle') || fallback)?.focus({ preventScroll: true });
     if (selection && replacement instanceof HTMLTextAreaElement) {
       replacement.setSelectionRange(...selection);
       replacement.scrollTop = editorScroll;
@@ -403,6 +447,40 @@ function renderFile(i: number): void {
   if (scrollY !== scrollTop) scrollPage(scrollTop);
   scheduleToolbar();
 }
+function renderFile(i: number): void {
+  if (drag?.file === i) finishDrag(false);
+  const file = review.files[i], state = states[i], changes = stats(i);
+  const commentCount = state.threads.length + state.threads.reduce((n, t) => n + t.replies.length, 0);
+  const card = document.getElementById(`file-${i}`)!;
+  card.classList.toggle('viewed', state.viewed);
+  const title = `<svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="file-title">${file.oldPath ? `<span class="old-path">${escape(file.oldPath)} → </span>` : ''}<strong>${escape(file.path)}</strong><span class="file-status">${escape(file.status)}</span></span>`;
+  replaceContent(card, `<div class="file-header">${button('toggle-file', title, `${attr(i)} aria-expanded="${state.open}" aria-controls="file-body-${i}" aria-label="${state.open ? 'Collapse' : 'Expand'} ${escape(file.path)} (${escape(file.status)})"`, 'file-toggle')}
+    <span class="priority ${file.priority}">${file.priority === 'high' ? 'Focus' : file.priority === 'low' ? 'Can skim' : 'Normal'}</span>${draftBadge(i)}${file.kind !== 'binary' && file.kind !== 'submodule' ? `<span class="diff-stats"><span class="add-text">+${changes.added}</span> <span class="remove-text">−${changes.removed}</span></span>` : ''}${commentCount ? `<span class="comment-count" title="${commentCount} comments">${commentCount} comments</span>` : ''}
+    <label class="viewed-control"><input type="checkbox" data-viewed="${i}" ${state.viewed ? 'checked' : ''}>Viewed</label></div>
+    <div id="file-body-${i}" class="file-body" ${state.open ? '' : 'hidden'}>${state.open ? `<div class="file-actions"><span>${file.kind === 'symlink' ? 'Symbolic link · target only' : file.kind === 'text' ? file.status === 'unchanged' ? 'No changes' : 'Changes' : file.kind === 'binary' ? `Binary file · ${file.before?.bytes || 0} → ${file.after?.bytes || 0} bytes` : 'Submodule'}${file.before && file.after && file.before.mode !== file.after.mode ? ` · mode ${escape(file.before.mode)} → ${escape(file.after.mode)}` : ''}</span>${button('file-comment', '+ File comment', attr(i))}</div>
+      <div class="file-discussions">${state.threads.filter(t => t.line === undefined).map(t => threadHTML(i, t)).join('')}${editor?.file === i && !editor.thread && editor.anchor?.line === undefined ? composerHTML() : ''}</div>
+      ${state.loaded ? diffHTML(i) : `<div class="load-file">${isLarge(i) ? `<p>Large diff · ${changes.added + changes.removed} changed lines</p>` : '<p>Ready to review</p>'}${button('load-file', 'Load diff', attr(i))}</div>`}` : ''}</div>`);
+}
+function commentControl(scope: Scope): HTMLElement | null {
+  return document.querySelector<HTMLElement>(scope.file !== undefined ? `#file-${scope.file} [data-action="file-comment"]` : scope.group !== undefined ? `#group-${scope.group} [data-action="group-comment"]` : '[data-action="review-comment"]');
+}
+function renderScope(scope: Scope): void {
+  if (scope.file !== undefined) { renderFile(scope.file); return; }
+  replaceContent(scopeElement(scope), scopeState(scope).threads.map(thread => threadHTML(scope, thread)).join('') + (sameScope(editor, scope) && !editor!.thread ? composerHTML() : ''), commentControl(scope));
+}
+function setGroupOpen(i: number, open: boolean): void {
+  groupStates[i].open = open;
+  document.getElementById(`group-files-${i}`)!.hidden = !open;
+  document.querySelector(`#group-${i} [data-action="toggle-group"]`)!.setAttribute('aria-expanded', String(open));
+  scheduleToolbar();
+}
+function showScope(scope: Scope): void {
+  if (scope.file === undefined) return;
+  const group = fileGroups.get(scope.file);
+  if (group !== undefined) setGroupOpen(group, true);
+  states[scope.file].open = true;
+  states[scope.file].loaded = true;
+}
 function focusEditor(): void {
   const target = document.querySelector<HTMLElement>('#composer [aria-invalid="true"]') || document.getElementById('comment-text');
   target?.focus({ preventScroll: true });
@@ -410,35 +488,34 @@ function focusEditor(): void {
 }
 function canReplaceEditor(): boolean { return !editor || editor.text === editor.initialText || !hasDraft() || confirm('Discard the unfinished comment?'); }
 function returnFromEditor(previous: Editor): void {
-  const card = document.getElementById(`file-${previous.file}`)!;
+  const card = scopeElement(previous);
   const target = previous.thread
     ? card.querySelector<HTMLElement>(`#thread-${previous.thread} [data-action="${previous.editRoot ? 'edit-root' : previous.reply ? 'edit-reply' : 'reply'}"]${previous.reply ? `[data-reply="${previous.reply}"]` : ''}`)
     : previous.anchor?.line !== undefined ? card.querySelector<HTMLElement>(`[data-action="line"][data-side="${previous.anchor.side || 'new'}"][data-line="${previous.anchor.line}"]`)
-    : card.querySelector<HTMLElement>('[data-action="file-comment"]');
+    : commentControl(previous);
   (target || card.querySelector<HTMLElement>('.file-toggle'))?.focus({ preventScroll: true });
 }
 function openEditor(next: Editor): void {
   if (!canReplaceEditor()) return;
-  const previous = editor?.file;
+  const previous = editor;
   editor = { ...next, initialText: next.text, originLine: next.originLine ?? next.anchor?.line };
   if (editor.anchor?.line !== undefined) editor.anchor.endLine ??= editor.anchor.line;
-  states[next.file].open = true;
-  states[next.file].loaded = true;
-  if (previous !== undefined && previous !== next.file) renderFile(previous);
-  renderFile(next.file); updateNavigation();
+  showScope(next);
+  if (previous && !sameScope(previous, next)) renderScope(previous);
+  renderScope(next); updateNavigation();
   saveFeedback(); focusEditor();
 }
 function saveComment(): void {
   if (!editor) return;
-  const i = editor.file, state = states[i], text = editor.text;
-  if (!text.trim()) { editor.error = 'Write a comment before adding it.'; editor.invalid = 'text'; editor.preview = false; renderFile(i); focusEditor(); return; }
-  if (editor.anchor?.line !== undefined && !editor.thread) {
-    const max = lines((editor.anchor.side === 'old' ? review.files[i].before : review.files[i].after)?.text).length;
+  const scope = editor, state = scopeState(scope), text = editor.text;
+  if (!text.trim()) { editor.error = 'Write a comment before adding it.'; editor.invalid = 'text'; editor.preview = false; renderScope(scope); focusEditor(); return; }
+  if (editor.file !== undefined && editor.anchor?.line !== undefined && !editor.thread) {
+    const max = lines((editor.anchor.side === 'old' ? review.files[editor.file].before : review.files[editor.file].after)?.text).length;
     const end = editor.anchor.endLine ?? editor.anchor.line;
     if (!Number.isInteger(editor.anchor.line) || !Number.isInteger(end) || editor.anchor.line < 1 || end < editor.anchor.line || end > max) {
       editor.error = `Select valid lines from 1 to ${max} in this file.`;
       editor.invalid = undefined; editor.preview = false;
-      renderFile(i); focusEditor(); return;
+      renderScope(scope); focusEditor(); return;
     }
   }
   const thread = state.threads.find(t => t.id === editor!.thread);
@@ -449,11 +526,10 @@ function saveComment(): void {
   const edited = editor.editRoot || editor.reply;
   const saved = thread || state.threads[state.threads.length - 1];
   editor = null;
-  renderFile(i); updateNavigation(); saveFeedback();
+  renderScope(scope); updateNavigation(); saveFeedback();
   document.querySelector<HTMLElement>(`#thread-${saved.id} [data-action="reply"]`)?.focus();
   document.getElementById('announcement')!.textContent = edited ? 'Comment updated.' : 'Comment added to this review.';
 }
-function applyTheme(): void { document.documentElement.dataset.theme = theme === 'system' ? dark.matches ? 'dark' : 'light' : theme; }
 function setNav(open: boolean): void {
   const sidebar = document.getElementById('sidebar')!;
   if (open && mobile.matches) {
@@ -509,15 +585,15 @@ function exportReview(): void {
     editor.error = 'Add your comment or cancel it before copying feedback.';
     editor.invalid = undefined; editor.preview = false;
     setNav(false);
-    if (!visible(editor.file)) {
+    if ((editor.file !== undefined && !visible(editor.file)) || (editor.group !== undefined && !groupVisible(editor.group))) {
       query = ''; filter = '';
       (document.getElementById('search') as HTMLInputElement).value = '';
       updateNavigation();
     }
-    states[editor.file].open = true;
-    renderFile(editor.file); focusEditor(); return;
+    showScope(editor);
+    renderScope(editor); updateNavigation(); focusEditor(); return;
   }
-  (document.getElementById('markdown-output') as HTMLTextAreaElement).value = exportMarkdown(review, states);
+  (document.getElementById('markdown-output') as HTMLTextAreaElement).value = exportMarkdown(review, states, { review: reviewState.threads, groups: groupStates.map(state => state.threads) });
   document.getElementById('copy-status')!.textContent = '';
   void copyOutput();
 }
@@ -525,7 +601,7 @@ function exportReview(): void {
 function selectLines(i: number, side: Side, first: number, last = first, extend = false): void {
   const sameAnchor = editor?.file === i && !editor.thread && editor.anchor?.line !== undefined && editor.anchor.side === side;
   if (editor?.selectingEnd && !sameAnchor) {
-    document.getElementById('announcement')!.textContent = `Select a ${editor.anchor!.side} line in ${review.files[editor.file].path}.`;
+    document.getElementById('announcement')!.textContent = `Select a ${editor.anchor!.side} line in ${review.files[editor.file!].path}.`;
     return;
   }
   if (sameAnchor && editor) {
@@ -607,7 +683,12 @@ document.addEventListener('click', event => {
   event.preventDefault();
   // WebKit does not focus clicked buttons; keep action/keyboard continuity across rerenders.
   target.focus({ preventScroll: true });
-  const action = target.dataset.action, i = Number(target.dataset.file), thread = states[i]?.threads.find(t => t.id === target.dataset.thread);
+  const action = target.dataset.action;
+  if (['previous-file', 'next-file', 'previous-comment', 'next-comment'].includes(action || '')) {
+    updateToolbar();
+    if ((target as HTMLButtonElement).disabled) return;
+  }
+  const scope = scopeFromElement(target), i = Number(target.dataset.file), thread = scopeState(scope)?.threads.find(t => t.id === target.dataset.thread);
   switch (action) {
     case 'toggle-file':
       states[i].open = !states[i].open;
@@ -630,29 +711,30 @@ document.addEventListener('click', event => {
     case 'line': selectLines(i, target.dataset.side as Side, Number(target.dataset.line), Number(target.dataset.line), event.shiftKey); break;
     case 'select-end':
       editor!.selectingEnd = !editor!.selectingEnd;
-      renderFile(editor!.file);
+      renderScope(editor!);
       if (editor!.selectingEnd) {
         document.getElementById('announcement')!.textContent = `Select the end line on the ${editor!.anchor!.side} side of this file.`;
         document.querySelector<HTMLElement>(`#file-${editor!.file} .line-number [data-side="${editor!.anchor!.side}"][data-line="${editor!.anchor!.endLine}"]`)?.focus({ preventScroll: true });
       }
       break;
-    case 'file-comment': openEditor({ file: i, text: '' }); break;
-    case 'reply': openEditor({ file: i, text: '', thread: thread!.id }); break;
-    case 'edit-root': openEditor({ file: i, text: thread!.text, thread: thread!.id, editRoot: true }); break;
-    case 'edit-reply': openEditor({ file: i, text: thread!.replies.find(r => r.id === target.dataset.reply)!.text, thread: thread!.id, reply: target.dataset.reply }); break;
+    case 'toggle-group': setGroupOpen(scope.group!, !groupStates[scope.group!].open); break;
+    case 'review-comment': case 'group-comment': case 'file-comment': openEditor({ ...scope, text: '' }); break;
+    case 'reply': openEditor({ ...scope, text: '', thread: thread!.id }); break;
+    case 'edit-root': openEditor({ ...scope, text: thread!.text, thread: thread!.id, editRoot: true }); break;
+    case 'edit-reply': openEditor({ ...scope, text: thread!.replies.find(r => r.id === target.dataset.reply)!.text, thread: thread!.id, reply: target.dataset.reply }); break;
     case 'delete-root':
       if (!confirm(thread!.replies.length ? 'Delete this comment and all its replies?' : 'Delete this comment?')) return;
       if (editor?.thread === thread!.id) editor = null;
-      states[i].threads = states[i].threads.filter(t => t !== thread); renderFile(i); updateNavigation(); saveFeedback(); break;
+      scopeState(scope).threads = scopeState(scope).threads.filter(t => t !== thread); renderScope(scope); updateNavigation(); saveFeedback(); break;
     case 'delete-reply':
       if (!confirm('Delete this reply?')) return;
       if (editor?.reply === target.dataset.reply) editor = null;
-      thread!.replies = thread!.replies.filter(r => r.id !== target.dataset.reply); renderFile(i); updateNavigation(); saveFeedback(); break;
+      thread!.replies = thread!.replies.filter(r => r.id !== target.dataset.reply); renderScope(scope); updateNavigation(); saveFeedback(); break;
     case 'cancel-comment': {
       if (!canReplaceEditor()) return;
-      const previous = editor!; editor = null; renderFile(previous.file); updateNavigation(); saveFeedback(); returnFromEditor(previous); break;
+      const previous = editor!; editor = null; renderScope(previous); updateNavigation(); saveFeedback(); returnFromEditor(previous); break;
     }
-    case 'write-tab': case 'preview-tab': editor!.preview = action === 'preview-tab'; renderFile(editor!.file); if (!editor!.preview) focusEditor(); break;
+    case 'write-tab': case 'preview-tab': editor!.preview = action === 'preview-tab'; renderScope(editor!); if (!editor!.preview) focusEditor(); break;
     case 'retry-save': if (restoreFailed) window.location.reload(); else saveFeedback(true); break;
     case 'export': exportReview(); break;
     case 'copy-output': void copyOutput(); break;
@@ -666,8 +748,11 @@ document.addEventListener('click', event => {
       states.forEach((s, n) => { if (s.open && s.loaded) renderFile(n); }); break;
     case 'nav': setNav(!navOpen); if (navOpen && event.detail === 0) document.getElementById('search')?.focus(); break;
     case 'navigate': case 'previous-file': case 'next-file': navigateFile(i); break;
+    case 'navigate-review': case 'navigate-group': navigateContext(scope); break;
     case 'previous-comment': case 'next-comment':
-      navigateFile(i, { id: target.dataset.thread!, direction: action === 'next-comment' ? 1 : -1, anchor: target.dataset.anchor! }); break;
+      if (scope.file !== undefined) navigateFile(i, { id: target.dataset.thread!, direction: action === 'next-comment' ? 1 : -1, anchor: target.dataset.anchor! });
+      else navigateContext(scope, target.dataset.thread!);
+      break;
   }
 });
 document.addEventListener('input', event => {
@@ -679,7 +764,7 @@ document.addEventListener('input', event => {
   }
   if (el.id === 'comment-text' && editor) {
     editor.text = el.value;
-    document.querySelectorAll<HTMLElement>(`[data-draft-file="${editor.file}"]`).forEach(badge => badge.hidden = !hasDraft());
+    updateDraftBadges();
     saveFeedback();
   }
   if (el.id === 'search') { query = el.value.toLowerCase(); updateNavigation(); }
@@ -693,7 +778,6 @@ document.addEventListener('change', event => {
     if (!el.checked && !isLarge(i)) states[i].loaded = true;
     renderFile(i); updateNavigation(); saveFeedback();
   }
-  if (el.id === 'theme') { theme = el.value; applyTheme(); }
 });
 window.addEventListener('beforeunload', event => {
   if (feedbackString() === savedFeedback) return;
@@ -712,7 +796,7 @@ document.addEventListener('copy', event => {
 document.addEventListener('submit', event => { if ((event.target as HTMLElement).id === 'composer') { event.preventDefault(); saveComment(); } });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && drag) { event.preventDefault(); finishDrag(false); return; }
-  if (event.key === 'Escape' && editor?.selectingEnd) { event.preventDefault(); editor.selectingEnd = false; renderFile(editor.file); focusEditor(); return; }
+  if (event.key === 'Escape' && editor?.selectingEnd) { event.preventDefault(); editor.selectingEnd = false; renderScope(editor); focusEditor(); return; }
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && (event.target as HTMLElement).closest('#composer')) { event.preventDefault(); saveComment(); }
   if (event.key === 'Escape' && navOpen) { setNav(false); document.querySelector<HTMLElement>('[data-action="nav"]')?.focus(); }
 });
@@ -731,10 +815,10 @@ if ('ResizeObserver' in window) new ResizeObserver(resizeToolbar).observe(docume
 window.addEventListener('resize', resizeToolbar);
 window.addEventListener('scroll', scheduleToolbar, { passive: true });
 resizeToolbar();
-dark.addEventListener('change', applyTheme);
 restoreFeedback();
-applyTheme();
 states.forEach((_, i) => renderFile(i));
+renderScope({});
+groupStates.forEach((_, group) => renderScope({ group }));
 updateNavigation();
 if (editor) focusEditor();
 if ('IntersectionObserver' in window) {

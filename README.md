@@ -37,20 +37,21 @@ The CLI opens a temporary `file://` page in your default browser and prints its 
 | `base` supplied | That commit → final working tree; includes later commits and uncommitted changes |
 | Repository with no commits | Empty version → working tree |
 
-Only listed files are included, in the supplied order. Explicitly selected untracked files count as additions. Paths are repository-root-relative, not relative to the JSON file. `base` accepts a Git commit reference; the resolved commit is recorded in the page. A clean working tree with no `base` has no uncommitted changes.
+Only listed files are included, in the supplied order. Plans can use a flat `files` array or single-level `groups` containing ordered files and optional group comments. Optional top-level `comments` provide an opening review overview. Explicitly selected untracked files count as additions. Paths are repository-root-relative, not relative to the JSON file. `base` accepts a Git commit reference; the resolved commit is recorded in the page. A clean working tree with no `base` has no uncommitted changes.
 
 See the [input contract and annotated example](skills/revmap/SKILL.md#input) for priorities, Markdown notes, line ranges and explicit renames. [`examples/review.json`](examples/review.json) is a runnable plan for this repository. Invalid input fails with a field name and repair hint rather than silently omitting data.
 
 ### Review and copy
 
-- Read in the agent's order. **Focus / Normal / Can skim** tags distinguish priorities without reordering files; low-priority files start folded.
+- Start with the review overview, then follow the agent's ordered groups and files when groups are provided. Group headings and comments stay available when you fold the group's files; Viewed is still tracked per file.
+- **Focus / Normal / Can skim** distinguish critical or high-risk, ordinary, and safely skimmable changes without reordering files; low-priority files start folded.
 - Use the fixed toolbar to move between files or discussion threads in the current filter. Replies stay within their discussion. File headers stay visible below the toolbar while scrolling.
-- Use unified or split diffs, expand unchanged context, and leave file or line comments. Hold a line's **+** and drag up or down to select a range; release to comment. The selection highlights live and scrolls at the page edge. Shift-click also selects a range. For touch or keyboard use without dragging, click a line, choose **Select end line**, then choose the last line. No line numbers need to be typed. Reply to initial Agent notes or your own discussions. Your comments can be edited or deleted; Agent notes are read-only.
+- Leave review-wide or group feedback next to its overview, or use unified/split diffs, expand unchanged context, and leave file or line comments. File notes appear as a separate context area before the diff; line discussions remain anchored beside the relevant code. Hold a line's **+** and drag up or down to select a range; release to comment. The selection highlights live and scrolls at the page edge. Shift-click also selects a range. For touch or keyboard use without dragging, click a line, choose **Select end line**, then choose the last line. No line numbers need to be typed. Reply to initial Agent notes or your own discussions. Your comments can be edited or deleted; Agent notes are read-only.
 - Click the chevron or filename to fold a file. Folding or marking **Viewed** keeps an unfinished comment, indicated by **Draft**. Deleting comments or discarding changed drafts asks for confirmation.
 - **Viewed** marks a file as read and folds it. It does not approve the code. Reopening a file does not clear the checkbox.
-- **Copy feedback** copies the final Viewed checklist, all human comments and replies, their anchors/excerpts, and replied-to Agent notes as Markdown. Filters do not limit the export; other Agent notes are omitted. Finish or cancel a pending comment before copying. Success appears on the button; if automatic clipboard access fails, a dialog provides the Markdown for manual selection and copying.
+- **Copy feedback** copies the final Viewed checklist, all human comments and replies, their review/group/file/line scope, anchors/excerpts, and replied-to Agent notes as Markdown, with **Agent** and **User** author labels. Filters do not limit the export; other Agent notes are omitted. Finish or cancel a pending comment before copying. Success appears on the button; if automatic clipboard access fails, a dialog provides the Markdown for manual selection and copying.
 
-English UI, system/light/dark themes, and responsive touch layouts are included. Mobile support means the web page layout and controls; it does not provide phone transfer, hosting, or guarantee that a mobile file previewer executes JavaScript.
+English UI, automatic light/dark colors following the system, and responsive touch layouts are included. Mobile support means the web page layout and controls; it does not provide phone transfer, hosting, or guarantee that a mobile file previewer executes JavaScript.
 
 ## Boundaries
 
@@ -90,7 +91,7 @@ npx skills add . --list
 The published package includes the compiled CLI and embedded browser assets, Skill and example; dependencies are bundled. A local package can be exercised without publishing:
 
 ```sh
-npm exec --yes --package ./revmap-0.1.3.tgz -- revmap --help
+npm exec --yes --package ./revmap-0.1.4.tgz -- revmap --help
 ```
 
 Runtime input and snapshot types live in `src/model.ts`; validation and Git access are separate from browser interaction and Markdown export. `src/core.ts` is a local test entry point, not a public package API.

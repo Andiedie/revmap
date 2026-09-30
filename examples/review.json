@@ -1,18 +1,37 @@
 {
-  "files": [
+  "comments": [
+    { "text": "Review the local snapshot contract, then the browser interaction. Files are explicitly selected; verify comment coordinates and feedback handling without expecting a live connection back to the repository." }
+  ],
+  "groups": [
     {
-      "path": "src/git.ts",
-      "priority": "high",
+      "title": "Snapshot contract",
       "comments": [
-        { "text": "Start with snapshot boundaries: only listed paths enter the review, and patch contents must match comment coordinates." }
+        { "text": "Read the snapshot shape before checking how Git supplies it. Selected paths, comparison versions and comment coordinates must agree." }
+      ],
+      "files": [
+        { "path": "src/model.ts", "comments": [{ "text": "Check the review, group and file shapes that connect input, snapshots and the page." }] },
+        {
+          "path": "src/git.ts",
+          "priority": "high",
+          "comments": [
+            { "text": "Only listed paths enter the review, and patch contents must match comment coordinates." }
+          ]
+        }
       ]
     },
     {
-      "path": "src/web.ts",
+      "title": "Review interaction",
       "comments": [
-        { "text": "Walk through line selection, replies, Viewed, and copying the final feedback. Everything stays inside this page." }
+        { "text": "Check the human review flow after the snapshot contract: navigation, discussion scopes and exporting feedback." }
+      ],
+      "files": [
+        {
+          "path": "src/web.ts",
+          "comments": [
+            { "text": "Walk through line selection, replies, Viewed, and copying the final feedback. Everything stays inside this page." }
+          ]
+        }
       ]
-    },
-    { "path": "src/model.ts", "priority": "low" }
+    }
   ]
 }

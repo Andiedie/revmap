@@ -103,15 +103,15 @@ const { createPatch } = require('diff');
     await page.locator('[data-action="close-export"]').click();
     await page.locator('[data-action="layout"][data-layout="split"]').click();
     assert.equal(await page.locator('#file-0 table.split').count(), 1);
-    await page.locator('#theme').selectOption('dark');
-    await page.waitForTimeout(200);
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.waitForFunction(() => getComputedStyle(document.documentElement).colorScheme === 'dark');
     await page.screenshot({ path: path.join(artifacts, 'desktop-dark.png') });
     for (const width of [320, 768, 1024]) {
       await page.setViewportSize({ width, height: 844 });
       await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth);
     }
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.locator('#theme').selectOption('light');
+    await page.emulateMedia({ colorScheme: 'light' });
     await page.waitForFunction(() => !document.querySelector('#file-0 table.split'));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.locator('[data-action="nav"]').click();

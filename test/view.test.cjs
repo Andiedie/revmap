@@ -29,7 +29,9 @@ test('export contains final Viewed state, human feedback, parent context, side a
   const output = exportMarkdown(review, feedback);
   assert.match(output, /- \[x\] `` src\/`danger`\.ts ``/);
   assert.match(output, /> Agent context/);
-  assert.match(output, /Please simplify\./);
+  assert.match(output, /\*\*User — reply:\*\*\n\nPlease simplify\./);
+  assert.match(output, /\*\*User:\*\*\n\nKeep this behavior\./);
+  assert.doesNotMatch(output, /\bYou\b/);
   assert.match(output, /### old L2/);
   assert.match(output, /```\nsecond\n```/);
   assert.doesNotMatch(output, /untouched Agent note/);
@@ -37,6 +39,20 @@ test('export contains final Viewed state, human feedback, parent context, side a
   feedback[0].threads.pop();
   assert.match(exportMarkdown(review, feedback), /- \[ \]/);
   assert.doesNotMatch(exportMarkdown(review, feedback), /Keep this behavior/);
+});
+
+test('export includes review and group feedback, preserves grouped checklists, and omits untouched Agent explanations', () => {
+  const grouped = { ...review, comments: [{ text: 'Overall scope' }], groups: [{ title: 'Behavior `and` safety', comments: [{ text: 'Group context' }], files: [0] }] };
+  const feedback = initialFeedback(grouped);
+  const reviewThreads = [{ id: 'a-review-0', author: 'Agent', text: 'Overall scope', replies: [{ id: 'u-1', text: 'Review-wide feedback' }] }];
+  const groups = [[{ id: 'a-group-0-0', author: 'Agent', text: 'Group context', replies: [] }, { id: 'u-2', author: 'You', text: 'Group-wide feedback', replies: [] }]];
+  const output = exportMarkdown(grouped, feedback, { review: reviewThreads, groups });
+  assert.match(output, /Overall scope/); assert.match(output, /Review-wide feedback/);
+  assert.match(output, /Behavior.*and.*safety/); assert.match(output, /\*\*User:\*\*\n\nGroup-wide feedback/);
+  assert.match(output, /\*\*User — reply:\*\*\n\nReview-wide feedback/);
+  assert.doesNotMatch(output, /\bYou\b/);
+  assert.doesNotMatch(output, /Group context|untouched Agent note/);
+  assert.match(output, /- \[ \] `` src\/`danger`\.ts ``/);
 });
 
 test('HTML is self-contained and data cannot terminate its script element', () => {

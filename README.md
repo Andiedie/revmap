@@ -44,16 +44,17 @@ See the [input contract and annotated example](skills/revmap/SKILL.md#input) for
 ### Review and copy
 
 - Read in the agent's order. **Focus / Normal / Can skim** tags distinguish priorities without reordering files; low-priority files start folded.
+- Use the fixed toolbar to move between files or discussion threads in the current filter. Replies stay within their discussion. File headers stay visible below the toolbar while scrolling.
 - Use unified or split diffs, expand unchanged context, and leave file or line comments. Hold a line's **+** and drag up or down to select a range; release to comment. The selection highlights live and scrolls at the page edge. Shift-click also selects a range. For touch or keyboard use without dragging, click a line, choose **Select end line**, then choose the last line. No line numbers need to be typed. Reply to initial Agent notes or your own discussions. Your comments can be edited or deleted; Agent notes are read-only.
 - Click the chevron or filename to fold a file. Folding or marking **Viewed** keeps an unfinished comment, indicated by **Draft**. Deleting comments or discarding changed drafts asks for confirmation.
 - **Viewed** marks a file as read and folds it. It does not approve the code. Reopening a file does not clear the checkbox.
-- **Copy review** exports the final Viewed checklist, all human comments and replies, their anchors/excerpts, and replied-to Agent notes. Other Agent notes are omitted. Finish or cancel a pending comment before copying. If automatic clipboard access fails, the Markdown remains visible for manual selection and copying.
+- **Copy feedback** copies the final Viewed checklist, all human comments and replies, their anchors/excerpts, and replied-to Agent notes as Markdown. Filters do not limit the export; other Agent notes are omitted. Finish or cancel a pending comment before copying. Success appears on the button; if automatic clipboard access fails, a dialog provides the Markdown for manual selection and copying.
 
 English UI, system/light/dark themes, and responsive touch layouts are included. Mobile support means the web page layout and controls; it does not provide phone transfer, hosting, or guarantee that a mobile file previewer executes JavaScript.
 
 ## Boundaries
 
-- **Browser-local feedback.** Viewed, comments, replies and changed drafts automatically save to `localStorage` per review snapshot. Refreshing or reopening the same HTML in the same browser restores them. Saved changes do not require copying before leaving; failed saves show a warning and request a best-effort browser confirmation when changes could be lost. An unreadable cache is kept intact and saving pauses until a reload can restore it. **Copy review** still copies Markdown for you to pass back to the agent; nothing writes back into the HTML or repository. Clearing browser data removes saved feedback. `file://` storage varies by browser; moving the HTML or using another browser does not guarantee recovery. Concurrent editing of the same snapshot in multiple tabs is unsupported; later saves can overwrite earlier ones.
+- **Browser-local feedback.** Viewed, comments, replies and changed drafts automatically save to `localStorage` per review snapshot. Refreshing or reopening the same HTML in the same browser restores them. Saved changes do not require copying before leaving; failed saves show a warning and request a best-effort browser confirmation when changes could be lost. An unreadable cache is kept intact and saving pauses until a reload can restore it. **Copy feedback** still copies Markdown for you to pass back to the agent; nothing writes back into the HTML or repository. Clearing browser data removes saved feedback. `file://` storage varies by browser; moving the HTML or using another browser does not guarantee recovery. Concurrent editing of the same snapshot in multiple tabs is unsupported; later saves can overwrite earlier ones.
 - **Local snapshot.** The CLI exits after generating/opening the page. Later file changes do not update it. The page contains selected source code; keep the HTML private unless you intentionally share it. Temporary files are left for the user/OS to clean up.
 - **No task inference.** The caller chooses files and `base`. revmap does not isolate changes made before a conversation or infer rename sources.
 - **Special files.** Binary/non-UTF-8 content is not embedded or previewed. Symlinks show their target text without following them. Submodules show commit references, not nested changes. Binary files and submodules support file comments only. Version modes and content are compared, including empty files and executable-bit changes.
@@ -89,7 +90,7 @@ npx skills add . --list
 The published package includes the compiled CLI and embedded browser assets, Skill and example; dependencies are bundled. A local package can be exercised without publishing:
 
 ```sh
-npm exec --yes --package ./revmap-0.1.2.tgz -- revmap --help
+npm exec --yes --package ./revmap-0.1.3.tgz -- revmap --help
 ```
 
 Runtime input and snapshot types live in `src/model.ts`; validation and Git access are separate from browser interaction and Markdown export. `src/core.ts` is a local test entry point, not a public package API.

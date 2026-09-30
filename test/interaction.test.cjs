@@ -8,7 +8,7 @@ const { renderHTML } = require('../dist/core.cjs');
 const enabled = process.env.REVMAP_EDGE_BROWSER === '1';
 const options = { skip: !enabled, timeout: 30000 };
 const artifacts = path.resolve('.test-output');
-let browser, url;
+let browser, url, toolbarURL;
 before(async () => {
   if (!enabled) return;
   const old = Array.from({ length: 85 }, (_, i) => `const value${i + 1} = ${i + 1};`).join('\n') + '\n';
@@ -22,6 +22,15 @@ before(async () => {
   ] };
   fs.mkdirSync(artifacts, { recursive: true });
   const output = path.join(artifacts, 'interactions.html'); fs.writeFileSync(output, renderHTML(review)); url = pathToFileURL(output).href;
+  review.files[0] = { ...review.files[0], status: 'added', before: null, patch: createPatch('file', '', text), comments: [
+    { line: 20, text: 'Check how the long source line behaves when scrolling horizontally.' },
+    { text: 'Start here: the toolbar and file actions should stay within reach throughout the review.' },
+    { line: 62, text: 'Keep navigating without losing your place in a long diff.' }
+  ] };
+  review.files[1].comments = [{ text: 'File navigation follows the review order.' }];
+  review.files[2].comments = [{ line: 2, text: 'Comment navigation also opens folded files.' }];
+  review.files[3].comments = [{ line: 3, side: 'old', text: 'Deleted lines remain reachable.' }];
+  const toolbar = path.join(artifacts, 'toolbar.html'); fs.writeFileSync(toolbar, renderHTML(review)); toolbarURL = pathToFileURL(toolbar).href;
   const { chromium, webkit } = require('playwright');
   const engine = process.env.PLAYWRIGHT_ENGINE === 'webkit' ? webkit : chromium;
   browser = await engine.launch(engine === webkit || process.env.PLAYWRIGHT_CHANNEL === 'bundled' ? {} : { channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome' });
@@ -66,7 +75,8 @@ for (const mobile of [false, true]) test(`file headers stick within their own fi
   const scrollInside = () => page.locator('#file-0').evaluate(el => scrollTo(0, scrollY + el.getBoundingClientRect().top + 500));
   await scrollInside();
   const pinned = await header.boundingBox();
-  assert.ok(Math.abs(pinned.y) < 1, 'the current filename and controls must stay at the viewport top');
+  const toolbarHeight = (await page.locator('#review-toolbar').boundingBox()).height;
+  assert.ok(Math.abs(pinned.y - toolbarHeight) < 1, 'the current filename and controls must stay below the toolbar');
   await page.locator('#file-0 .diff-scroll').evaluate(el => el.scrollLeft = 300);
   assert.deepEqual(await header.boundingBox(), pinned, 'horizontal code scrolling must not move the file header');
   assert.equal(await page.locator('[data-viewed="0"]').evaluate(el => {
@@ -83,10 +93,10 @@ for (const mobile of [false, true]) test(`file headers stick within their own fi
   });
   const released = await header.boundingBox(), card = await page.locator('#file-0').boundingBox();
   assert.ok(released.y < 0 && Math.abs(released.y + released.height - card.y - card.height + 1) < 1, 'the header must leave with the end of its file');
-  await page.locator('#file-1').evaluate(el => scrollTo(0, scrollY + el.getBoundingClientRect().top + 30));
-  assert.ok(Math.abs((await page.locator('#file-1 .file-header').boundingBox()).y) < 1, 'the next file takes over the sticky position');
+  await page.locator('#file-1').evaluate(el => scrollTo(0, scrollY + el.getBoundingClientRect().top - document.getElementById('review-toolbar').offsetHeight + 30));
+  assert.ok(Math.abs((await page.locator('#file-1 .file-header').boundingBox()).y - toolbarHeight) < 1, 'the next file takes over the sticky position');
   const previous = await header.boundingBox();
-  assert.ok(previous.y + previous.height <= 0, 'previous headers must not stack above the next file');
+  assert.ok(previous.y + previous.height <= toolbarHeight, 'previous headers must not stack above the next file');
   await scrollInside();
   await page.locator('[data-viewed="0"]').check();
   assert.equal(await page.locator('[data-viewed="0"]').isChecked(), true);
@@ -119,6 +129,163 @@ test('navigation keeps filenames compact, adds parent paths only for duplicates,
   await page.locator('#file-nav [data-file="2"]').click();
   assert.equal(await page.locator('#file-2 .file-title strong').textContent(), paths[2], 'the file header keeps the full path');
   assert.equal(await page.locator('#file-2 .file-toggle').getAttribute('aria-expanded'), 'true');
+});
+
+for (const mobile of [false, true]) test(`toolbar stays reachable and file navigation follows scrolling and filters on ${mobile ? 'mobile' : 'desktop'}`, options, async t => {
+  const page = await pageFor(t, mobile);
+  await page.goto(toolbarURL);
+  await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  const next = page.getByRole('button', { name: 'Next file', exact: true });
+  const previous = page.getByRole('button', { name: 'Previous file', exact: true });
+  assert.equal(await previous.isDisabled(), true);
+  await page.locator('#file-0 [data-action="file-comment"]').click();
+  await page.locator('#comment-text').fill('Keep this draft while navigating.');
+  await next.click();
+  assert.equal(await page.locator('#file-position').textContent(), '2 / 4');
+  assert.equal(await page.locator('#file-nav [aria-current="true"]').getAttribute('data-file'), '1');
+  assert.equal(await page.locator('[data-viewed="1"]').isChecked(), false);
+  await previous.click();
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Keep this draft while navigating.');
+  await page.locator('#file-0').evaluate(el => scrollTo(0, scrollY + el.getBoundingClientRect().top + 700));
+  await page.waitForFunction(() => document.getElementById('file-position').textContent === '1 / 4');
+  assert.ok(Math.abs((await page.locator('#review-toolbar').boundingBox()).y) < 1);
+  const bar = await page.locator('#review-toolbar').boundingBox(), header = await page.locator('#file-0 .file-header').boundingBox();
+  assert.ok(Math.abs(header.y - bar.y - bar.height) < 1, 'the file header must sit below the toolbar');
+  await page.screenshot({ path: path.join(artifacts, `toolbar-${mobile ? 'mobile' : 'desktop'}.png`) });
+  await next.click();
+  assert.equal(await page.locator('#file-position').textContent(), '2 / 4');
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.waitForFunction(() => document.getElementById('file-position').textContent === '1 / 4');
+  if (mobile) await page.locator('[data-action="nav"]').click();
+  await page.locator('#search').fill('src/web.ts');
+  assert.equal(await page.locator('#file-position').textContent(), '1 / 1');
+  assert.equal(await previous.isDisabled(), true);
+  assert.equal(await next.isDisabled(), true);
+  await page.locator('#search').fill('no-such-file');
+  assert.equal(await page.locator('#file-position').textContent(), '0 / 0');
+  assert.equal(await page.getByRole('button', { name: 'Next comment', exact: true }).isDisabled(), true);
+  if (mobile) await page.keyboard.press('Escape');
+  await page.locator('[data-action="clear-filter"]').click();
+  await page.getByRole('button', { name: 'Copy feedback', exact: true }).click();
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Keep this draft while navigating.');
+  assert.equal(await page.locator('#comment-text').evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.locator('#composer .error').isVisible(), true);
+});
+
+for (const mobile of [false, true]) test(`comment navigation follows discussion order, spans files and preserves drafts on ${mobile ? 'mobile' : 'desktop'}`, options, async t => {
+  const page = await pageFor(t, mobile);
+  await page.goto(toolbarURL);
+  await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  const next = page.getByRole('button', { name: 'Next comment', exact: true });
+  const previous = page.getByRole('button', { name: 'Previous comment', exact: true });
+  assert.equal(await previous.isDisabled(), true);
+  for (const [index, id] of ['a-0-1', 'a-0-0', 'a-0-2', 'a-1-0', 'a-2-0', 'a-3-0'].entries()) {
+    await next.click();
+    assert.equal(await page.evaluate(() => document.activeElement.id), `thread-${id}`);
+    assert.equal(await page.locator('#comment-position').textContent(), `${index + 1} / 6`);
+    const thread = await page.locator(`#thread-${id}`).boundingBox();
+    const header = await page.locator(`#file-${id.split('-')[1]} .file-header`).boundingBox();
+    assert.ok(thread.y >= header.y + header.height - 1, 'the target must not be hidden behind sticky controls');
+  }
+  assert.equal(await next.isDisabled(), true);
+  assert.equal(await page.locator('#file-2 .file-toggle').getAttribute('aria-expanded'), 'true');
+  await previous.click();
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'thread-a-2-0');
+  await page.locator('#thread-a-2-0 [data-action="reply"]').click();
+  await page.locator('#comment-text').fill('A reply stays within its discussion.');
+  await page.locator('#composer button[type="submit"]').click();
+  assert.match(await page.locator('#comment-position').textContent(), /\/ 6$/);
+  await page.locator('#thread-a-2-0 [data-action="reply"]').click();
+  await page.locator('#comment-text').fill('Unfinished reply');
+  await next.click();
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Unfinished reply');
+  await previous.click();
+  assert.equal(await page.locator('#comment-text').inputValue(), 'Unfinished reply');
+  assert.equal(await page.locator('[data-viewed="2"]').isChecked(), false);
+});
+
+test('comment navigation tracks manual scrolling and uses rendered order in both diff layouts', options, async t => {
+  const page = await pageFor(t);
+  await page.goto(toolbarURL); await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  const next = page.getByRole('button', { name: 'Next comment', exact: true });
+  await next.click(); await next.click();
+  await page.locator('#file-0 .line-number [data-side="new"][data-line="50"]').evaluate(el => {
+    const offset = document.getElementById('review-toolbar').offsetHeight + document.querySelector('#file-0 .file-header').offsetHeight + 12;
+    scrollTo(0, scrollY + el.getBoundingClientRect().top - offset);
+  });
+  await page.waitForFunction(() => document.getElementById('comment-position').textContent === '2 / 6');
+  await page.getByRole('button', { name: 'Previous comment', exact: true }).click();
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'thread-a-0-0', 'between comments, Previous targets the nearest preceding discussion');
+  const review = await page.evaluate(() => JSON.parse(document.getElementById('review-data').textContent));
+  const before = 'keep\nold one\nold two\nlast\n', after = 'keep\nnew one\nnew two\nlast\n';
+  review.files = [{ ...review.files[0], status: 'modified', before: { text: before, bytes: before.length, mode: '100644' }, after: { text: after, bytes: after.length, mode: '100644' },
+    patch: createPatch('file', before, after), comments: [{ line: 3, side: 'old', text: 'Old third line' }, { line: 2, text: 'New second line' }, { text: 'File discussion' }, { line: 2, side: 'old', text: 'Old second line' }, { line: 4, text: 'Unchanged context' }] }];
+  const output = path.join(artifacts, 'toolbar-split.html'); fs.writeFileSync(output, renderHTML(review));
+  await page.goto(pathToFileURL(output).href); await page.locator('#file-0 .code-row').first().waitFor();
+  for (const layout of ['unified', 'split']) {
+    await page.locator(`[data-layout="${layout}"]`).click();
+    await page.locator('#file-nav [data-file="0"]').click();
+    const ids = await page.locator('#file-0 .thread').evaluateAll(threads => threads.map(thread => thread.id));
+    for (const id of ids) { await next.focus(); await page.keyboard.press('Enter'); assert.equal(await page.evaluate(() => document.activeElement.id), id); }
+    assert.equal(await next.isDisabled(), true);
+  }
+});
+
+test('mobile Files overlays the page below the toolbar and dismisses without losing the reading position', options, async t => {
+  const page = await pageFor(t, true);
+  const files = page.locator('[data-action="nav"]');
+  for (const y of [0, 500]) {
+    await page.evaluate(y => scrollTo(0, y), y);
+    const initial = await page.evaluate(() => scrollY);
+    // Use viewport touches to test reading position without test-runner scrolling.
+    const target = await point(files);
+    await page.touchscreen.tap(target.x, target.y);
+    assert.equal(await page.locator('#sidebar').evaluate(el => el.matches(':popover-open')), true);
+    const bar = await page.locator('#review-toolbar').boundingBox(), sidebar = await page.locator('#sidebar').boundingBox();
+    assert.ok(sidebar.y >= bar.y + bar.height, 'the file list must not cover toolbar actions, even before the toolbar pins');
+    assert.equal(await page.evaluate(() => scrollY), initial);
+    await page.keyboard.press('Escape');
+    assert.equal(await files.getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.evaluate(() => scrollY), initial);
+  }
+  await files.tap();
+  await page.locator('#review-toolbar [data-action="next-file"]').tap();
+  assert.equal(await page.locator('#sidebar').evaluate(el => el.matches(':popover-open')), false);
+  assert.equal(await files.getAttribute('aria-expanded'), 'false');
+});
+
+test('comment navigation reaches paginated discussions without rendering the whole large diff', options, async t => {
+  const page = await pageFor(t);
+  const review = await page.evaluate(() => JSON.parse(document.getElementById('review-data').textContent));
+  const text = 'line\n'.repeat(6000);
+  review.files = [{ ...review.files[1], after: { text, bytes: text.length, mode: '100644' }, patch: createPatch('file', '', text),
+    comments: [{ text: 'Review the large file.' }, { line: 5500, text: 'This discussion starts outside the rendered page.' }] }];
+  const output = path.join(artifacts, 'toolbar-large.html'); fs.writeFileSync(output, renderHTML(review));
+  await page.goto(pathToFileURL(output).href); await page.locator('#boot-error').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('.code-row').count(), 0);
+  const next = page.getByRole('button', { name: 'Next comment', exact: true });
+  await next.click(); await next.click();
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'thread-a-0-1');
+  assert.equal(await page.locator('.code-row').count(), 600);
+  assert.equal(await next.isDisabled(), true);
+});
+
+test('Copy feedback copies all feedback inline, shows success and opens Markdown only on failure', options, async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { window.copiedFeedback = text; } } }));
+  await page.locator('[data-viewed="1"]').check();
+  await page.locator('#search').fill('src/git.ts');
+  await page.getByRole('button', { name: 'Copy feedback', exact: true }).click();
+  await page.getByRole('button', { name: 'Copied', exact: true }).waitFor();
+  assert.equal(await page.locator('#export-dialog').evaluate(el => el.open), false);
+  assert.match(await page.evaluate(() => window.copiedFeedback), /- \[x\] ` src\/web.ts `/);
+  await page.locator('[data-viewed="0"]').check();
+  assert.equal(await page.locator('[data-action="export"]').textContent(), 'Copy feedback', 'new changes must clear stale success');
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }));
+  await page.locator('[data-action="export"]').click();
+  await page.locator('#export-dialog').waitFor({ state: 'visible' });
+  assert.match(await page.locator('#copy-status').textContent(), /Automatic copy is unavailable/);
+  assert.equal(await page.locator('#markdown-output').evaluate(el => el === document.activeElement && el.selectionStart === 0 && el.selectionEnd === el.value.length), true);
 });
 
 test('responsive rerender preserves the focused draft and its selection', options, async t => {
@@ -392,8 +559,7 @@ async function warnsOnLeave(page) {
 }
 async function copyFeedback(page) {
   await page.locator('[data-action="export"]').click();
-  await page.waitForFunction(() => document.getElementById('copy-status').textContent === 'Copied to clipboard.');
-  await page.locator('[data-action="close-export"]').click();
+  await page.getByRole('button', { name: 'Copied', exact: true }).waitFor();
 }
 
 async function reloadReview(page) {
@@ -435,7 +601,7 @@ test('feedback, edits, replies, deletions and Viewed survive refresh without req
   await page.locator('[data-action="export"]').click();
   const output = await page.locator('#markdown-output').inputValue();
   assert.match(output, /Edited feedback/); assert.match(output, /Edited reply/); assert.match(output, /Another comment/);
-  await page.locator('[data-action="close-export"]').click();
+  await page.getByRole('button', { name: 'Copied', exact: true }).waitFor();
   for (const action of ['delete-reply', 'delete-root']) {
     page.once('dialog', dialog => dialog.accept());
     await page.locator(`#thread-u-1 [data-action="${action}"]`).click();
@@ -458,7 +624,7 @@ test('failed or pending copies do not affect persistence or the leave guard', op
   } }));
   await page.locator('[data-action="export"]').click();
   assert.equal(await warnsOnLeave(page), false);
-  await page.locator('[data-action="close-export"]').click();
+  assert.equal(await page.locator('#export-dialog').evaluate(el => el.open), false);
   await page.locator('[data-viewed="1"]').check();
   await page.evaluate(() => window.finishCopy());
   assert.equal(await warnsOnLeave(page), false);
@@ -654,12 +820,26 @@ test('changing a snapshot at the same file URL isolates feedback even with ident
   assert.equal(await page.locator('[data-viewed="0"]').isChecked(), true);
 });
 
-test('clipboard waiting is visible and prevents duplicate requests without blocking manual copy or closing', options, async t => {
+test('clipboard waiting stays inline and prevents duplicate requests; fallback retries still allow manual copy and closing', options, async t => {
   const page = await pageFor(t);
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
     writeText: () => new Promise(resolve => { window.finishCopy = resolve; })
   } }));
   await page.locator('[data-action="export"]').click();
+  assert.equal(await page.locator('[data-action="export"]').textContent(), 'Copying…');
+  assert.equal(await page.locator('[data-action="export"]').isDisabled(), true);
+  assert.equal(await page.locator('#export-dialog').evaluate(el => el.open), false);
+  await page.getByRole('button', { name: 'Next file', exact: true }).click();
+  assert.equal(await page.locator('#file-position').textContent(), '2 / 4');
+  await page.evaluate(() => window.finishCopy());
+  await page.getByRole('button', { name: 'Copied', exact: true }).waitFor();
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }));
+  await page.locator('[data-action="export"]').click();
+  await page.locator('#export-dialog').waitFor({ state: 'visible' });
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    writeText: () => new Promise(resolve => { window.finishCopy = resolve; })
+  } }));
+  await page.locator('[data-action="copy-output"]').click();
   assert.equal(await page.locator('#copy-status').textContent(), 'Copying…');
   assert.equal(await page.locator('[data-action="copy-output"]').isDisabled(), true);
   assert.equal(await page.locator('[data-action="select-output"]').isEnabled(), true);

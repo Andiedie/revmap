@@ -28,7 +28,8 @@ interface Editor { file: number; text: string; initialText?: string; originLine?
 interface SavedFeedback { version: 1; feedback: Feedback[]; editor: Pick<Editor, 'file' | 'text' | 'initialText' | 'originLine' | 'anchor' | 'thread' | 'reply' | 'editRoot'> | null; sequence: number }
 interface Drag { pointer: number; target: HTMLElement; file: number; side: Side; first: number; last: number; x: number; y: number; moved: boolean }
 let drag: Drag | null = null, dragFrame = 0, ignorePointerClick = false;
-let editor: Editor | null = null, sequence = 0, copyAttempt = 0, layout = 'unified', filter = '', query = '', navOpen = false;
+let editor: Editor | null = null, sequence = 0, copyAttempt = 0, copyReset = 0, toolbarFrame = 0, layout = 'unified', filter = '', query = '', navOpen = false;
+let navigationJump: { file: number; thread?: string; y: number } | null = null;
 const mobile = matchMedia('(max-width: 760px)');
 const dark = matchMedia('(prefers-color-scheme: dark)');
 let theme = 'system';
@@ -55,13 +56,15 @@ app.innerHTML = `
   <header class="topbar"><a class="brand" href="#">${icon}<span>revmap</span></a><span class="repo-name">${escape(review.repository)}</span><span class="local-badge">Local snapshot</span>
     <label class="theme-control"><span class="sr-only">Theme</span><select id="theme"><option value="system">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
   </header>
+  <nav id="review-toolbar" aria-label="Review navigation and actions"><div class="toolbar-inner"><div class="toolbar-navigation">
+    ${(['file', 'comment'] as const).map(kind => `<div class="step-group" role="group" aria-label="${kind === 'file' ? 'File' : 'Comment'} navigation">${button(`previous-${kind}`, '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>', `aria-label="Previous ${kind}"`, 'step-button')}<span class="step-caption">${kind === 'file' ? 'File' : 'Comments'}<span id="${kind}-position"></span></span>${button(`next-${kind}`, '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg>', `aria-label="Next ${kind}"`, 'step-button')}</div>`).join('')}
+    </div><div class="toolbar-actions">${button('nav', 'Files', 'aria-expanded="false" aria-controls="sidebar" popovertarget="sidebar"', 'mobile-nav')}<div class="layout-controls" role="group" aria-label="Diff layout">${button('layout', 'Unified', 'data-layout="unified" aria-pressed="true"')}${button('layout', 'Split', 'data-layout="split" aria-pressed="false"')}</div>${button('export', 'Copy feedback', '', 'primary copy-review')}</div></div></nav>
   <div class="review-heading"><div><div class="eyebrow">REVIEW MAP</div><h1>Review changes <span class="count">${review.files.length}</span></h1><p class="snapshot"><code>${review.base ? escape(review.base.slice(0, 8)) : 'empty'}</code><span>→</span>Working tree<span class="snapshot-time">· ${escape(new Date(review.createdAt).toLocaleString())}</span></p><div id="storage-warning" class="error" role="alert" hidden><span></span> ${button('retry-save', 'Retry save')}</div></div>
-    <div class="heading-actions">${button('nav', 'Files', 'aria-expanded="false" aria-controls="sidebar"', 'mobile-nav')}${button('export', 'Copy review <span aria-hidden="true">↗</span>', '', 'primary copy-review')}</div>
   </div>
   <div class="workspace"><aside id="sidebar"><div class="sidebar-top"><h2>Review order</h2><span id="progress-text"></span></div><progress id="progress" max="${review.files.length}" value="0" aria-label="Files viewed"></progress>
     <label class="search"><span class="sr-only">Filter files</span><input id="search" type="search" placeholder="Filter files…" autocomplete="off"></label>
     <div class="filters" role="group" aria-label="File filters">${button('filter', 'All', 'data-filter="" aria-pressed="true"')}${button('filter', 'Unviewed', 'data-filter="unviewed" aria-pressed="false"')}${button('filter', 'Discussed', 'data-filter="discussed" aria-pressed="false"')}</div><nav id="file-nav" aria-label="Files in review order"></nav>
-  </aside><main id="content" tabindex="-1"><div class="content-toolbar"><span id="visible-count"></span><div class="layout-controls" role="group" aria-label="Diff layout">${button('layout', 'Unified', 'data-layout="unified" aria-pressed="true"')}${button('layout', 'Split', 'data-layout="split" aria-pressed="false"')}</div></div>
+  </aside><main id="content" tabindex="-1">
     <div id="files">${review.files.map((_, i) => `<section class="file-card" id="file-${i}" aria-label="${escape(review.files[i].path)}" data-index="${i}"></section>`).join('')}</div>
     <div id="empty" class="empty" hidden><h2>No matching files</h2>${button('clear-filter', 'Clear filters')}</div>
   </main></div>
@@ -86,6 +89,8 @@ function storageWarning(message: string): void {
   warning.querySelector('button')!.textContent = restoreFailed ? 'Reload' : 'Retry save';
 }
 function saveFeedback(force = false): void {
+  const copy = document.querySelector<HTMLButtonElement>('[data-action="export"]')!;
+  if (!copy.disabled) { clearTimeout(copyReset); copy.textContent = 'Copy feedback'; }
   if (restoreFailed) return; // Keep an unread cache intact; recovery requires a reload.
   const data = feedbackSnapshot(), current = feedbackString(data);
   if (!force && current === savedFeedback) return;
@@ -162,7 +167,6 @@ function updateNavigation(): void {
   document.getElementById('file-nav')!.innerHTML = review.files.map((file, i) => !visible(i) ? '' : `<a href="#file-${i}" data-action="navigate" data-file="${i}" title="${escape(file.path)}" class="nav-file ${states[i].viewed ? 'is-viewed' : ''}"><span class="nav-order">${states[i].viewed ? '✓' : i + 1}</span><span class="nav-path"><span class="nav-name">${escape(fileLabels[i].name)}</span>${fileLabels[i].directory ? `<span class="nav-directory">${escape(fileLabels[i].directory)}</span>` : ''}</span>${draftBadge(i)}<span class="priority-dot ${file.priority}" title="${file.priority} priority"><span class="sr-only">${file.priority} priority</span></span>${humanCount(i) ? `<span class="nav-count" aria-label="${humanCount(i)} feedback comments">${humanCount(i)}</span>` : ''}</a>`).join('');
   let count = 0;
   states.forEach((_, i) => { const shown = visible(i); document.getElementById(`file-${i}`)!.hidden = !shown; if (shown) count++; });
-  document.getElementById('visible-count')!.textContent = `${count} file${count === 1 ? '' : 's'}`;
   document.getElementById('empty')!.hidden = count !== 0;
   document.querySelectorAll<HTMLButtonElement>('[data-action="filter"]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.filter === filter)));
   if (focusedFile?.hidden) {
@@ -171,11 +175,95 @@ function updateNavigation(): void {
     const fallback = next < 0 ? states.findIndex((_, i) => visible(i)) : next;
     (fallback < 0 ? document.querySelector<HTMLElement>('[data-action="clear-filter"]') : document.querySelector<HTMLElement>(`#file-${fallback} .file-toggle`))?.focus();
   }
+  updateToolbar();
+}
+function toolbarItems(): { files: number[]; comments: { file: number; id: string; element: HTMLElement | null }[] } {
+  // ponytail: linear target scan per frame; cache geometry if large reviews make scrolling slow.
+  const files = states.flatMap((_, i) => visible(i) ? [i] : []);
+  const comments = files.flatMap(file => {
+    const rendered = Array.from(document.querySelectorAll<HTMLElement>(`#file-${file} .thread`));
+    const ids = rendered.map(el => el.id.slice('thread-'.length)), present = new Set(ids);
+    const missing = states[file].threads.filter(thread => !present.has(thread.id));
+    return [...ids, ...missing.map(thread => thread.id)].map(id => ({ file, id, element: document.getElementById(`thread-${id}`) }));
+  });
+  return { files, comments };
+}
+function updateToolbar(): void {
+  const { files, comments } = toolbarItems();
+  const top = document.getElementById('review-toolbar')!.getBoundingClientRect().bottom;
+  if (navOpen) document.getElementById('sidebar')!.style.setProperty('--navigation-top', `${top + 8}px`);
+  if (navigationJump && (navigationJump.y !== scrollY || !files.includes(navigationJump.file) || (navigationJump.thread && !comments.some(comment => comment.id === navigationJump!.thread)))) navigationJump = null;
+  let currentFile = files.length ? 0 : -1;
+  files.forEach((file, index) => { if (document.getElementById(`file-${file}`)!.getBoundingClientRect().top <= top + 1) currentFile = index; });
+  if (navigationJump) currentFile = files.indexOf(navigationJump.file);
+  const file = files[currentFile];
+  const headerHeight = document.querySelector(`#file-${file} .file-header`)?.getBoundingClientRect().height || 0;
+  const readingTop = top + headerHeight + 12;
+  let currentComment = -1;
+  comments.forEach((comment, index) => {
+    if (comment.file < file || (comment.file === file && comment.element && comment.element.getBoundingClientRect().top <= readingTop + 1)) currentComment = index;
+  });
+  if (navigationJump?.thread) currentComment = comments.findIndex(comment => comment.id === navigationJump!.thread);
+  else if (navigationJump) currentComment = comments.filter(comment => comment.file < file).length - 1;
+  const current = comments[currentComment];
+  const insideComment = !!current && (!!navigationJump?.thread || (!!current.element && current.element.getBoundingClientRect().bottom > readingTop && current.element.getBoundingClientRect().top <= readingTop + 1));
+  document.getElementById('file-position')!.textContent = `${currentFile + 1} / ${files.length}`;
+  document.getElementById('comment-position')!.textContent = `${currentComment < 0 && comments.length ? '—' : currentComment + 1} / ${comments.length}`;
+  for (const [action, index] of [['previous-file', currentFile - 1], ['next-file', currentFile + 1]] as const) {
+    const control = document.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!;
+    control.disabled = index < 0 || index >= files.length;
+    control.dataset.file = String(files[index]);
+  }
+  for (const [action, index] of [['previous-comment', currentComment - (insideComment ? 1 : 0)], ['next-comment', currentComment + 1]] as const) {
+    const control = document.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!;
+    control.disabled = index < 0 || index >= comments.length;
+    control.dataset.file = String(comments[index]?.file);
+    control.dataset.thread = comments[index]?.id || '';
+    control.dataset.anchor = current?.id || '';
+  }
+  document.querySelectorAll<HTMLElement>('#file-nav .nav-file').forEach(link => {
+    if (Number(link.dataset.file) === file) link.setAttribute('aria-current', 'true');
+    else link.removeAttribute('aria-current');
+  });
+}
+function scheduleToolbar(): void {
+  if (!toolbarFrame) toolbarFrame = requestAnimationFrame(() => { toolbarFrame = 0; updateToolbar(); });
+}
+function scrollPage(top: number): void {
+  const root = document.scrollingElement!;
+  window.scrollTo({ top: Math.max(0, Math.min(top, root.scrollHeight - root.clientHeight)), behavior: 'instant' });
+}
+function revealTarget(target: HTMLElement): void {
+  const header = target.closest('.file-card')?.querySelector('.file-header');
+  const offset = document.getElementById('review-toolbar')!.getBoundingClientRect().height + (target.classList.contains('file-card') ? 0 : header?.getBoundingClientRect().height || 0) + 12;
+  scrollPage(scrollY + target.getBoundingClientRect().top - offset);
+}
+function navigateFile(i: number, comment?: { id: string; direction: number; anchor: string }): void {
+  const missing = comment && !document.getElementById(`thread-${comment.id}`);
+  const load = !!comment || !isLarge(i), changed = !states[i].open || (load && !states[i].loaded);
+  states[i].open = true;
+  if (load) states[i].loaded = true;
+  if (changed) renderFile(i);
+  setNav(false);
+  const card = document.getElementById(`file-${i}`)!;
+  let target = card;
+  if (comment) {
+    const threads = Array.from(card.querySelectorAll<HTMLElement>('.thread'));
+    const anchor = threads.findIndex(thread => thread.id === `thread-${comment.anchor}`);
+    target = missing ? threads[anchor >= 0 ? anchor + comment.direction : comment.direction > 0 ? 0 : threads.length - 1] : document.getElementById(`thread-${comment.id}`)!;
+    if (!target) return;
+    target.classList.add('navigation-target');
+    setTimeout(() => target.classList.remove('navigation-target'), 1500);
+  }
+  revealTarget(target);
+  (comment ? target : card.querySelector<HTMLElement>('.file-toggle'))?.focus({ preventScroll: true });
+  navigationJump = { file: i, thread: comment ? target.id.slice('thread-'.length) : undefined, y: scrollY };
+  updateToolbar();
 }
 function threadHTML(i: number, thread: Thread): string {
   const controls = `data-file="${i}" data-thread="${thread.id}"`;
   const content = (author: string, text: string, tools: string) => `<div class="comment-heading"><span class="avatar ${author === 'Agent' ? 'agent' : ''}" aria-hidden="true">${author === 'Agent' ? 'A' : 'Y'}</span><strong>${author}</strong>${tools}</div><div class="markdown-body">${markdown(text)}</div>`;
-  let html = `<article class="thread" id="thread-${thread.id}"><div class="thread-anchor">${thread.line === undefined ? 'File discussion' : escape(location(thread))}</div>`;
+  let html = `<article class="thread" id="thread-${thread.id}" tabindex="-1"><div class="thread-anchor">${thread.line === undefined ? 'File discussion' : escape(location(thread))}</div>`;
   html += content(thread.author, thread.text, thread.author === 'You' ? `<div class="comment-tools">${button('edit-root', 'Edit', controls)}${button('delete-root', 'Delete', controls)}</div>` : '<span class="agent-label">note</span>');
   for (const reply of thread.replies) html += `<div class="reply">${content('You', reply.text, `<div class="comment-tools">${button('edit-reply', 'Edit', `${controls} data-reply="${reply.id}"`)}${button('delete-reply', 'Delete', `${controls} data-reply="${reply.id}"`)}</div>`)}</div>`;
   html += editor?.file === i && editor.thread === thread.id ? composerHTML() : `<div class="reply-action">${button('reply', 'Reply…', controls)}</div>`;
@@ -281,6 +369,7 @@ function diffHTML(i: number): string {
 
 function renderFile(i: number): void {
   if (drag?.file === i) finishDrag(false);
+  const scrollTop = scrollY;
   const file = review.files[i], state = states[i], changes = stats(i);
   const commentCount = state.threads.length + state.threads.reduce((n, t) => n + t.replies.length, 0);
   const card = document.getElementById(`file-${i}`)!;
@@ -310,8 +399,15 @@ function renderFile(i: number): void {
       replacement.scrollTop = editorScroll;
     }
   }
+  // WebKit can clamp the page scroll while replacing a tall card, before its new content restores the height.
+  if (scrollY !== scrollTop) scrollPage(scrollTop);
+  scheduleToolbar();
 }
-function focusEditor(): void { (document.querySelector<HTMLElement>('#composer [aria-invalid="true"]') || document.getElementById('comment-text'))?.focus(); }
+function focusEditor(): void {
+  const target = document.querySelector<HTMLElement>('#composer [aria-invalid="true"]') || document.getElementById('comment-text');
+  target?.focus({ preventScroll: true });
+  if (target) revealTarget(target.closest<HTMLElement>('#composer')!);
+}
 function canReplaceEditor(): boolean { return !editor || editor.text === editor.initialText || !hasDraft() || confirm('Discard the unfinished comment?'); }
 function returnFromEditor(previous: Editor): void {
   const card = document.getElementById(`file-${previous.file}`)!;
@@ -359,33 +455,58 @@ function saveComment(): void {
 }
 function applyTheme(): void { document.documentElement.dataset.theme = theme === 'system' ? dark.matches ? 'dark' : 'light' : theme; }
 function setNav(open: boolean): void {
-  navOpen = open;
-  document.getElementById('sidebar')!.classList.toggle('mobile-open', open);
-  document.querySelector('[data-action="nav"]')!.setAttribute('aria-expanded', String(open));
+  const sidebar = document.getElementById('sidebar')!;
+  if (open && mobile.matches) {
+    sidebar.style.setProperty('--navigation-top', `${document.getElementById('review-toolbar')!.getBoundingClientRect().bottom + 8}px`);
+    sidebar.showPopover();
+  } else if (sidebar.matches(':popover-open')) sidebar.hidePopover();
+  navOpen = open && mobile.matches;
+  document.querySelector('[data-action="nav"]')!.setAttribute('aria-expanded', String(navOpen));
+}
+function copiedFeedback(): void {
+  const copy = document.querySelector<HTMLButtonElement>('[data-action="export"]')!;
+  copy.textContent = 'Copied';
+  document.getElementById('copy-status')!.textContent = 'Copied to clipboard.';
+  document.getElementById('announcement')!.textContent = 'Feedback copied to clipboard.';
+  clearTimeout(copyReset);
+  copyReset = window.setTimeout(() => { copy.textContent = 'Copy feedback'; }, 1800);
 }
 async function copyOutput(): Promise<void> {
   const output = document.getElementById('markdown-output') as HTMLTextAreaElement;
   const status = document.getElementById('copy-status')!;
   const dialog = document.getElementById('export-dialog') as HTMLDialogElement;
   const copyButton = dialog.querySelector<HTMLButtonElement>('[data-action="copy-output"]')!;
-  const attempt = ++copyAttempt, text = output.value;
-  copyButton.disabled = true; status.textContent = 'Copying…';
+  const copy = document.querySelector<HTMLButtonElement>('[data-action="export"]')!;
+  if (copy.disabled) return;
+  const attempt = ++copyAttempt, text = output.value, snapshot = feedbackString(), fromDialog = dialog.open;
+  clearTimeout(copyReset);
+  copy.disabled = copyButton.disabled = true;
+  copy.textContent = status.textContent = 'Copying…';
   try {
     if (!navigator.clipboard?.writeText) throw new Error('unavailable');
     await navigator.clipboard.writeText(text);
-    if (attempt === copyAttempt && dialog.open) status.textContent = 'Copied to clipboard.';
+    if (attempt === copyAttempt) {
+      if (snapshot === feedbackString()) copiedFeedback();
+      else {
+        copy.textContent = 'Copy feedback';
+        status.textContent = 'Earlier feedback copied. Copy again to include your changes.';
+        document.getElementById('announcement')!.textContent = status.textContent;
+      }
+    }
   } catch {
-    if (attempt === copyAttempt && dialog.open) {
+    if (attempt === copyAttempt) {
+      copy.textContent = 'Copy feedback';
       status.textContent = 'Automatic copy is unavailable. Select the text and use your browser’s Copy action.';
-      output.focus(); output.select();
+      if (!fromDialog && !dialog.open) dialog.showModal();
+      if (dialog.open) { output.focus(); output.select(); }
     }
   } finally {
-    if (attempt === copyAttempt) copyButton.disabled = false;
+    if (attempt === copyAttempt) copy.disabled = copyButton.disabled = false;
   }
 }
 function exportReview(): void {
   if (editor && hasDraft()) {
-    editor.error = 'Add your comment or cancel it before copying the review.';
+    editor.error = 'Add your comment or cancel it before copying feedback.';
     editor.invalid = undefined; editor.preview = false;
     setNav(false);
     if (!visible(editor.file)) {
@@ -397,7 +518,6 @@ function exportReview(): void {
     renderFile(editor.file); focusEditor(); return;
   }
   (document.getElementById('markdown-output') as HTMLTextAreaElement).value = exportMarkdown(review, states);
-  (document.getElementById('export-dialog') as HTMLDialogElement).showModal();
   document.getElementById('copy-status')!.textContent = '';
   void copyOutput();
 }
@@ -545,10 +665,9 @@ document.addEventListener('click', event => {
       document.querySelectorAll<HTMLElement>('[data-action="layout"]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.layout === layout)));
       states.forEach((s, n) => { if (s.open && s.loaded) renderFile(n); }); break;
     case 'nav': setNav(!navOpen); if (navOpen && event.detail === 0) document.getElementById('search')?.focus(); break;
-    case 'navigate':
-      states[i].open = true; if (!isLarge(i)) states[i].loaded = true; renderFile(i); setNav(false);
-      document.getElementById(`file-${i}`)!.scrollIntoView({ block: 'start' });
-      document.querySelector<HTMLButtonElement>(`#file-${i} .file-toggle`)?.focus({ preventScroll: true }); break;
+    case 'navigate': case 'previous-file': case 'next-file': navigateFile(i); break;
+    case 'previous-comment': case 'next-comment':
+      navigateFile(i, { id: target.dataset.thread!, direction: action === 'next-comment' ? 1 : -1, anchor: target.dataset.anchor! }); break;
   }
 });
 document.addEventListener('input', event => {
@@ -587,7 +706,8 @@ document.addEventListener('copy', event => {
   if (!event.isTrusted || event.defaultPrevented || document.activeElement !== output || output.selectionStart !== 0 || output.selectionEnd !== output.value.length) return;
   copyAttempt++;
   (document.querySelector('[data-action="copy-output"]') as HTMLButtonElement).disabled = false;
-  document.getElementById('copy-status')!.textContent = 'Copied to clipboard.';
+  (document.querySelector('[data-action="export"]') as HTMLButtonElement).disabled = false;
+  copiedFeedback();
 });
 document.addEventListener('submit', event => { if ((event.target as HTMLElement).id === 'composer') { event.preventDefault(); saveComment(); } });
 document.addEventListener('keydown', event => {
@@ -596,7 +716,21 @@ document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && (event.target as HTMLElement).closest('#composer')) { event.preventDefault(); saveComment(); }
   if (event.key === 'Escape' && navOpen) { setNav(false); document.querySelector<HTMLElement>('[data-action="nav"]')?.focus(); }
 });
-mobile.addEventListener('change', () => { states.forEach((s, i) => { if (s.open && s.loaded) renderFile(i); }); setNav(false); });
+const sidebar = document.getElementById('sidebar')!;
+sidebar.toggleAttribute('popover', mobile.matches);
+sidebar.addEventListener('toggle', () => {
+  navOpen = sidebar.matches(':popover-open');
+  document.querySelector('[data-action="nav"]')!.setAttribute('aria-expanded', String(navOpen));
+});
+mobile.addEventListener('change', () => { setNav(false); sidebar.toggleAttribute('popover', mobile.matches); states.forEach((s, i) => { if (s.open && s.loaded) renderFile(i); }); });
+const resizeToolbar = () => {
+  document.documentElement.style.setProperty('--toolbar-height', `${document.getElementById('review-toolbar')!.getBoundingClientRect().height}px`);
+  scheduleToolbar();
+};
+if ('ResizeObserver' in window) new ResizeObserver(resizeToolbar).observe(document.getElementById('review-toolbar')!);
+window.addEventListener('resize', resizeToolbar);
+window.addEventListener('scroll', scheduleToolbar, { passive: true });
+resizeToolbar();
 dark.addEventListener('change', applyTheme);
 restoreFeedback();
 applyTheme();

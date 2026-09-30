@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Keep file and discussion navigation, diff layout controls, and Copy feedback in a fixed review toolbar; file headers stay visible directly below it.
+- Navigate through files and discussion threads in the current filter, track manual scrolling, and preserve drafts and Viewed state. Mobile file navigation opens as an overlay without losing the reading position.
+- Rename Copy review to Copy feedback, copy all feedback regardless of filters, and show copying/success inline. Reveal unfinished drafts before export and open the Markdown dialog only when automatic copying fails.
+
 ## 0.1.2
 
 - Keep each file header visible while scrolling its diff, with Viewed and other file actions accessible until the next file takes over.
